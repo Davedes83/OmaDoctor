@@ -14,19 +14,28 @@
 
 run() {
   # run SCRIPT ARG...  -> stdout only, stdin closed, hard deadline
-  /usr/bin/timeout -k 2 90 /bin/sh "$@" 2>/dev/null </dev/null
+  #
+  # 150s, not 90: doctor.sh runs its sections SEQUENTIALLY behind per-section
+  # deadlines that now sum to ~87s worst case for a full scan. A harness
+  # deadline near the product's own budget will kill a slow-but-legitimate run
+  # mid-document and report it as a malformed payload, which looks exactly like
+  # a real failure and is not one.
+  /usr/bin/timeout -k 2 150 /bin/sh "$@" 2>/dev/null </dev/null
 }
 
 SYSINFO=$(run "$BACKEND_DIR/sysinfo.sh")
 AUDIO=$(run "$BACKEND_DIR/audio.sh")
 STORAGE=$(run "$BACKEND_DIR/storage.sh")
+SERVICES=$(run "$BACKEND_DIR/services.sh")
+HYPRLAND=$(run "$BACKEND_DIR/hyprland.sh")
 SYSINFO_BARE=$(run "$BACKEND_DIR/sysinfo.sh" --checks-only)
 QUICK=$(run "$BACKEND_DIR/doctor.sh" quick)
 FULL=$(run "$BACKEND_DIR/doctor.sh" full)
 
 # ------------------------------------------------------------ JSON validity
 
-for pair in "sysinfo:$SYSINFO" "audio:$AUDIO" "storage:$STORAGE"; do
+for pair in "sysinfo:$SYSINFO" "audio:$AUDIO" "storage:$STORAGE" \
+            "services:$SERVICES" "hyprland:$HYPRLAND"; do
   name=${pair%%:*}
   doc=${pair#*:}
   if printf '%s' "$doc" | jq -e . >/dev/null 2>&1; then
@@ -39,7 +48,8 @@ done
 # Every check must carry the full field set the UI reads.
 REQUIRED='.checks | length > 0 and all(.[]; has("id") and has("category") and has("title") and has("status") and has("severity") and has("value") and has("detail") and has("suggestion"))'
 missing=""
-for pair in "sysinfo:$SYSINFO" "audio:$AUDIO" "storage:$STORAGE"; do
+for pair in "sysinfo:$SYSINFO" "audio:$AUDIO" "storage:$STORAGE" \
+            "services:$SERVICES" "hyprland:$HYPRLAND"; do
   name=${pair%%:*}
   doc=${pair#*:}
   if ! printf '%s' "$doc" | jq -e "$REQUIRED" >/dev/null 2>&1; then
@@ -51,17 +61,23 @@ check_eq "every check carries the required fields" "" "$missing"
 # The optional fields are additive: when present they must have a valid shape,
 # and when absent Model.js treats them as [] / null. Nothing may emit a
 # half-formed descriptor, because the report would render it verbatim.
-#   details -> array of strings
-#   repair  -> null, or an object whose tier is one of the three known levels
+#   details -> absent, or an array in which every entry is a string
+#   repair  -> absent, null, or an object with a known tier and a label
+#
+# `(.details // [])` and `(.repair // null)` matter: referencing an ABSENT key
+# yields null in jq, and `null | type == "array"` is false, so testing the raw
+# key would fail every check that legitimately omits it. Coercing first makes
+# absent and empty mean the same thing -- which is exactly the contract.
 OPTIONAL='all(.checks[];
-  ((has("details") | not) or (.details | type == "array" and all(.details[]; type == "string")))
+  (((.details // []) | type == "array") and all((.details // [])[]; type == "string"))
   and
-  ((has("repair") | not) or (.repair == null)
-    or (.repair | type == "object" and has("tier") and has("label")
-        and (.tier == "safe" or .tier == "caution" or .tier == "manual")))
+  (((.repair // null) == null)
+    or ((.repair | type == "object") and (.repair | has("tier")) and (.repair | has("label"))
+        and ((.repair.tier) == "safe" or (.repair.tier) == "caution" or (.repair.tier) == "manual")))
 )'
 bad_optional=""
-for pair in "sysinfo:$SYSINFO" "audio:$AUDIO" "storage:$STORAGE"; do
+for pair in "sysinfo:$SYSINFO" "audio:$AUDIO" "storage:$STORAGE" \
+            "services:$SERVICES" "hyprland:$HYPRLAND"; do
   name=${pair%%:*}
   doc=${pair#*:}
   if ! printf '%s' "$doc" | jq -e "$OPTIONAL" >/dev/null 2>&1; then
@@ -77,12 +93,12 @@ check_eq "severity is a JSON number" "number" \
   "$(printf '%s' "$SYSINFO" | jq -r '.checks[0].severity | type')"
 
 # status must always be one of the four known states.
-bad=$(printf '%s' "$SYSINFO" "$AUDIO" "$STORAGE" \
+bad=$(printf '%s' "$SYSINFO" "$AUDIO" "$STORAGE" "$SERVICES" "$HYPRLAND" \
   | jq -s -r '[.[] | .checks[].status | select(. != "ok" and . != "info" and . != "attention" and . != "problem")] | length')
 check_eq "status values are within the known set" "0" "$bad"
 
 # ids must be unique, otherwise the UI cannot address a check by id.
-dupes=$(printf '%s' "$SYSINFO" "$AUDIO" "$STORAGE" \
+dupes=$(printf '%s' "$SYSINFO" "$AUDIO" "$STORAGE" "$SERVICES" "$HYPRLAND" \
   | jq -s -r '[.[] | .checks[].id] | (length - (unique | length))')
 check_eq "check ids are unique across sections" "0" "$dupes"
 
@@ -93,6 +109,20 @@ case "$(printf '%s' "$SYSINFO_BARE" | cut -c1)" in
   '{') ok "--checks-only omits the array brackets" ;;
   *)   fail "--checks-only omits the array brackets" "unexpected output" ;;
 esac
+
+# Every element of the merged array must be a CHECK, never a whole
+# {section,checks} document spliced in as an element.
+#
+# The bug this guards: a section that parses `--checks-only` away instead of
+# passing it through to emit_json emits the full document form, so doctor.sh
+# concatenates that document into the array. The result is still valid JSON and
+# still parses -- the checks simply have no `id`, which breaks every consumer
+# downstream (findingRows, findCheck, the report) with no error anywhere. A
+# nested document here is the fingerprint, so assert both that nothing lacks an
+# id and that nothing looks like a wrapped section.
+nested=$(printf '%s' "$QUICK" "$FULL" \
+  | jq -s -r '[.[] | .checks[] | select(((.id // "") == "") or has("section"))] | length')
+check_eq "no section document is spliced into the merged array" "0" "$nested"
 
 # ------------------------------------------------------------- doctor merging
 
@@ -114,6 +144,17 @@ case "$(printf '%s' "$FULL" | jq -r '.sections')" in
   *network*) ok "full scan includes network" ;;
   *)         fail "full scan includes network" "sections=$(printf '%s' "$FULL" | jq -r '.sections')" ;;
 esac
+
+# The local sections are cheap and must run in the TIMED scan too. If one of
+# these ever drops out of quick, it silently stops being checked until a user
+# happens to open the panel -- which is precisely when they least expect to
+# wait.
+for want in services hyprland; do
+  case "$(printf '%s' "$QUICK" | jq -r '.sections')" in
+    *"$want"*) ok "quick scan includes $want" ;;
+    *)         fail "quick scan includes $want" "sections=$(printf '%s' "$QUICK" | jq -r '.sections')" ;;
+  esac
+done
 
 # full must be a strict superset of quick in check count.
 q_n=$(printf '%s' "$QUICK" | jq -r '.checks | length')
@@ -145,6 +186,8 @@ cp "$BACKEND_DIR/doctor.sh" "$BACKEND_DIR/bootstrap.sh" "$BROKEN/" 2>/dev/null
 printf '#!/bin/sh\nexit 3\n' > "$BROKEN/sysinfo.sh"
 : > "$BROKEN/audio.sh"
 : > "$BROKEN/storage.sh"
+: > "$BROKEN/services.sh"
+: > "$BROKEN/hyprland.sh"
 broken=$(/usr/bin/timeout -k 2 60 /bin/sh "$BROKEN/doctor.sh" quick 2>/dev/null </dev/null)
 rm -rf "$BROKEN"
 if printf '%s' "$broken" \
@@ -160,6 +203,8 @@ cp "$BACKEND_DIR/doctor.sh" "$BACKEND_DIR/bootstrap.sh" "$SILENT/" 2>/dev/null
 printf '#!/bin/sh\nprintf ""\n' > "$SILENT/sysinfo.sh"
 : > "$SILENT/audio.sh"
 : > "$SILENT/storage.sh"
+: > "$SILENT/services.sh"
+: > "$SILENT/hyprland.sh"
 silent=$(/usr/bin/timeout -k 2 60 /bin/sh "$SILENT/doctor.sh" quick 2>/dev/null </dev/null)
 rm -rf "$SILENT"
 if printf '%s' "$silent" \
@@ -179,12 +224,45 @@ fi
 #
 # So: whatever this machine looks like, no check value may ever be text scraped
 # out of a command's usage/help output.
-fabricated=$(printf '%s' "$SYSINFO" "$AUDIO" "$STORAGE" \
+fabricated=$(printf '%s' "$SYSINFO" "$AUDIO" "$STORAGE" "$SERVICES" "$HYPRLAND" \
   | jq -s -r '[.[] | .checks[] | select(
       (.value | test("(?i)^(usage|commands?|options?|help)")) or
       (.detail | test("(?i)wpctl \\[OPTION"))
     )] | length')
 check_eq "no check reports text scraped from a usage banner" "0" "$fabricated"
+
+# The same hazard exists for the tools the Phase B sections call, with different
+# wording. hyprctl answers an unknown subcommand with "unknown request" and a
+# missing compositor instance with "HYPRLAND_INSTANCE_SIGNATURE not set!" --
+# both on stdout, both with exit status 0. systemctl answers an unknown verb with
+# "Unknown command verb". If any of that ever reached a check value or detail,
+# a working machine would be reported as broken (or worse, a broken one as
+# healthy). None of these strings may appear anywhere in a section's output.
+leaked_banner=$(printf '%s' "$SERVICES" "$HYPRLAND" \
+  | jq -s -r '[.[] | .checks[] | select(
+      ((.value // "") + " " + (.detail // "") + " " + (.suggestion // ""))
+      | test("(?i)unknown request|unknown command verb|hyprland_instance_signature|is hyprland running")
+    )] | length')
+check_eq "no check leaks a tool error banner as data" "0" "$leaked_banner"
+
+# "Not installed" is a legitimate, non-fault state -- a machine with no
+# bluetooth hardware is not broken. It must therefore never be escalated to a
+# problem, or every optional unit becomes a false alarm.
+notinstalled_problem=$(printf '%s' "$SERVICES" \
+  | jq -r '[.checks[]
+    | select(.value == "not installed")
+    | select(.status == "problem" or .status == "attention")] | length')
+check_eq "an uninstalled service is never escalated to a fault" "0" "$notinstalled_problem"
+
+# A daemon that could not be read must degrade to unknown, not to a guess.
+# "unknown" is the honest answer when systemctl or hyprctl cannot answer.
+# Assert the sections never invent a state: every services value is one of the
+# known systemd-ish words or an explicit unknown.
+bad_svc=$(printf '%s' "$SERVICES" | jq -r '[.checks[]
+  | select((.value | test("^(running|dead|exited|listening|failed|inactive|active|"
+       + "activating|deactivating|reloading|not installed|masked|unit error|unknown)$")) | not)
+  ] | length')
+check_eq "every service value is a known state or explicit unknown" "0" "$bad_svc"
 
 # The audio defaults must be either a real node name or an explicit unknown --
 # never a bare number that a user cannot act on.

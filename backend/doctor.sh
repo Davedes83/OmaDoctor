@@ -31,11 +31,15 @@ done
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 # Per-section deadline in seconds. Network is the slowest and gets the most.
+# These are worst-case budgets, not expected durations: a section that stalls
+# must be killed and reported as a problem rather than hanging the scan.
 deadline_for() {
   case "$1" in
     network) printf '25' ;;
     audio)   printf '12' ;;
     storage) printf '15' ;;
+    services) printf '10' ;;
+    hyprland) printf '10' ;;
     *)       printf '15' ;;
   esac
 }
@@ -73,6 +77,8 @@ add_section() {
 }
 
 add_section sysinfo
+add_section services
+add_section hyprland
 add_section audio
 add_section storage
 [ "$MODE" = "full" ] && add_section network

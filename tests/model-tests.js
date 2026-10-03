@@ -278,6 +278,25 @@ eq("findingRows tolerates empty input", 0, M.findingRows([]).length);
 eq("findingRows tolerates null input", 0, M.findingRows(null).length);
 eq("findingRows tolerates non-array input", 0, M.findingRows("nope").length);
 
+// Category order is the machine's shape, not alphabetical: what you are, then
+// what it depends on, then what makes noise. It also has to be STABLE, or the
+// panel reshuffles between scans. An unlisted category sorts last rather than
+// disappearing, so a future section needs no change here to appear.
+eq("byCategory orders categories by machine shape, not alphabetically",
+  "system,services,hyprland,audio,storage",
+  M.byCategory([
+    { category: "storage" }, { category: "audio" }, { category: "hyprland" },
+    { category: "services" }, { category: "system" }
+  ]).map(b => b.category).join(","));
+eq("an unlisted category sorts last rather than vanishing",
+  "system,gpu",
+  M.byCategory([{ category: "gpu" }, { category: "system" }])
+    .map(b => b.category).join(","));
+eq("byCategory ordering is stable regardless of input order",
+  "system,services,hyprland",
+  M.byCategory([{ category: "hyprland" }, { category: "services" }, { category: "system" }])
+    .map(b => b.category).join(","));
+
 // ------------------------------------------------- optional details + repair
 //
 // details[] and repair are ADDITIVE: a producer that omits them must parse to

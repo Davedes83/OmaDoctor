@@ -10,15 +10,30 @@ machine right now, and what do I do about it?*
 
 ## What it checks
 
-| Section   | Checks                                                                                     |
-|-----------|--------------------------------------------------------------------------------------------|
-| `system`  | OS, architecture, kernel, uptime, load, memory, swap, failed units, pending updates           |
-| `audio`   | server state, default output/input, volume and mute, device count                            |
-| `storage` | root and home filesystems, inode usage, root writability, largest directories                |
-| `network` | interfaces, default route, IPv4/IPv6, DNS config and resolution, gateway, reachability, latency |
+| Section     | Checks                                                                                         |
+|-------------|------------------------------------------------------------------------------------------------|
+| `system`    | OS, architecture, kernel, uptime, load, memory, swap, failed units, pending updates             |
+| `services`  | PipeWire, WirePlumber, desktop portals, NetworkManager, Bluetooth — each at its real scope       |
+| `hyprland`  | compositor version, monitor count, and every configuration error with its file and line          |
+| `audio`     | server state, default output/input, volume and mute, device count                              |
+| `storage`   | root and home filesystems, inode usage, root writability, largest directories                  |
+| `network`   | interfaces, default route, IPv4/IPv6, DNS config and resolution, gateway, reachability, latency |
 
-`quick` runs the local sections only (system, audio, storage). `full` adds the
-network section.
+`quick` runs the local sections only (system, services, hyprland, audio,
+storage). `full` adds the network section.
+
+Two details about `services` are worth knowing, because getting them wrong
+produces confident nonsense. `NetworkManager` and `bluetooth` are **system**
+units — asking `systemctl --user` for them returns `not-found`, so a
+user-only list would report two perfectly healthy daemons as missing. And a
+unit that simply is not installed is reported as `not installed`, never as a
+problem: a laptop with no bluetooth hardware is not broken.
+
+`hyprland` reports configuration errors verbatim — file, line and the
+compositor's own wording — because that is the information users otherwise
+have to dig out of a terminal. When no Hyprland instance is reachable (a TTY,
+a test harness, a nested session) every check reports `unknown`, never a
+failure.
 
 Every check reports one of four states, and the overall verdict is **worst-wins**
 rather than an average — one unreadable thing is more actionable than a blended
@@ -89,10 +104,26 @@ QML dependency, so the interesting logic is testable headlessly under `node`.
 
 Parsing third-party tool output is kept as pure functions so it can be pinned
 with fixtures instead of only being observed on one live machine — see
-`backend/wpctl-parse.sh` and `tests/wpctl-tests.sh`. A command that answers an
-unknown subcommand with a usage banner, or an error message that happens to
-contain digits, must never be scraped for a reading; the audio checks are the
-worked example of a check that once displayed "Usage:" as a healthy device.
+`backend/wpctl-parse.sh` with `tests/wpctl-tests.sh`, and
+`backend/hyprctl-parse.sh` with `tests/hyprctl-tests.sh`.
+
+The hazard is the same in both cases, and it is not hypothetical. `wpctl` has
+no `get-default-sink` subcommand: calling one prints a usage banner whose first
+line is `Usage:`, and the audio section once reported that string as a healthy
+device name. `hyprctl` is worse in three ways — an unknown subcommand answers
+`unknown request`, a missing compositor answers `HYPRLAND_INSTANCE_SIGNATURE
+not set!`, and **all of these exit 0**, so the exit status says nothing.
+Every parser therefore requires a positive structural token before returning a
+reading, and yields nothing otherwise. A check that read nothing is reported as
+`unknown`, which is the honest answer and never a fault.
+
+That is also why the spawner passes exactly two extra variables.
+`HYPRLAND_INSTANCE_SIGNATURE` names the compositor's per-instance socket and
+`XDG_RUNTIME_DIR` is the user runtime directory; without the first, `hyprctl`
+cannot work at all, and without the second `systemctl --user` cannot reach the
+user bus — both print an error and exit 0. They grant no capability beyond
+talking to your own session, so the hardened environment is otherwise
+unchanged: a fixed root-owned `PATH`, a pinned locale, and nothing inherited.
 
 Every helper is spawned through a hard deadline:
 
@@ -109,6 +140,9 @@ per-section deadlines, the outer budget must exceed their sum — see
 ## Status
 
 Read-only by design. It diagnoses and explains; it does not repair anything.
+A finding may describe what a fix *would* be — its risk tier and a one-line
+label — but OmaDoctor never runs it, never restarts a service, and never edits
+your configuration. The report says so whenever a finding carries one.
 
 ## License
 

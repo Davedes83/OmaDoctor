@@ -78,12 +78,20 @@ Panel {
 
   // ------------------------------------------------------------- scanning
   //
-  // doctor.sh runs its sections sequentially behind per-section deadlines
-  // (system 15s, audio 12s, storage 15s, network 25s), so the outer budget
-  // must exceed the SUM of them or a legitimately slow scan gets truncated
-  // mid-document and arrives unparseable.
+  // doctor.sh runs its sections sequentially behind per-section deadlines, so
+  // the outer budget must exceed the SUM of them or a legitimately slow scan
+  // gets truncated mid-document and arrives unparseable -- which the panel
+  // would then report as "could not read scan output".
+  //
+  //   quick: system 15 + services 10 + hyprland 10 + audio 12 + storage 15 = 62
+  //   full:  the above + network 25                                          = 87
+  //
+  // Both figures are worst case. Measured real timings are far lower (a few
+  // seconds), so these are headroom against a stalling probe, not an estimate
+  // of a normal scan. Keep them in step with deadline_for() in doctor.sh --
+  // adding a section without raising this is how a scan gets killed mid-write.
   function budgetFor(mode) {
-    return mode === "full" ? 75 : 50
+    return mode === "full" ? 100 : 75
   }
 
   function refresh(mode) {
@@ -193,10 +201,26 @@ Panel {
   readonly property string runnerPath: Qt.resolvedUrl("backend/run-capped.sh").toString().replace("file://", "")
   readonly property string doctorPath: Qt.resolvedUrl("backend/doctor.sh").toString().replace("file://", "")
   readonly property int maxOutputBytes: 1048576
+  // Two more variables, added deliberately and NOT by inheriting the shell's
+  // environment wholesale.
+  //
+  // hyprctl talks to the compositor over a per-instance socket whose path is
+  // carried in HYPRLAND_INSTANCE_SIGNATURE. Without it, hyprctl does not fail
+  // loudly -- it prints "HYPRLAND_INSTANCE_SIGNATURE not set!" and EXITS 0.
+  // A Hyprland section would then read that error text as its result and
+  // report a healthy machine as having no compositor, which is exactly the
+  // fabricated-reading-as-healthy bug the audio checks once had.
+  //
+  // XDG_RUNTIME_DIR is the standard user runtime directory; hyprctl uses it to
+  // locate that socket. Neither variable grants a capability beyond talking to
+  // the user's own compositor, so the hardened spawner stays hardened: PATH is
+  // still a fixed root-owned allowlist and nothing else is inherited.
   readonly property var trustedEnv: ({
     "PATH": "/usr/bin:/bin",
     "HOME": Quickshell.env("HOME"),
-    "LC_ALL": "C"
+    "LC_ALL": "C",
+    "HYPRLAND_INSTANCE_SIGNATURE": Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE") || "",
+    "XDG_RUNTIME_DIR": Quickshell.env("XDG_RUNTIME_DIR") || ""
   })
 
   function capText(text) {

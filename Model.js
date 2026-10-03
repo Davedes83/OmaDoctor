@@ -169,7 +169,12 @@ function counts(checks) {
 // byCategory(checks) -> ordered array of { category, checks, state }
 // Categories keep a stable order so the panel does not reshuffle between scans.
 function byCategory(checks) {
-  var order = ["system", "network", "audio", "storage", "bluetooth", "boot"],
+  // The order is the machine's shape, not alphabetical: what you are, then what
+  // it is connected to, then what makes noise. Any category not listed here
+  // sorts last, then alphabetically, so a new section appears predictably
+  // without needing a line added here first.
+  var order = ["system", "services", "hyprland", "network", "audio", "storage",
+               "bluetooth", "boot"],
     seen = {}, buckets = []
   if (!Array.isArray(checks)) return buckets
 
