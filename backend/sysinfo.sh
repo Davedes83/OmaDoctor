@@ -7,16 +7,14 @@
 # Nothing is modified and no privileged command is used.
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/common.sh"
 
+# Capture the requested output mode before any `set --` in this script
+# overwrites the positional parameters.
+MODE=${1:-}
+
 CHECKS=""
 
-emit() {
-  # emit ID CATEGORY STATUS SEVERITY TITLE VALUE DETAIL SUGGESTION
-  if [ -z "$CHECKS" ]; then
-    CHECKS="[$(check "$@")]"
-  else
-    CHECKS="$CHECKS,$(check "$@")]"
-  fi
-}
+# emit() is provided by common.sh (comma-separated accumulation; emit_json
+# adds the enclosing brackets once at print time). Do not redefine it here.
 
 # ------------------------------------------------------------------ OS / arch
 os_name=$(read_file /etc/os-release | /usr/bin/sed -n 's/^PRETTY_NAME="\(.*\)"$/\1/p' | /usr/bin/head -n 1)
@@ -24,14 +22,19 @@ os_id=$(read_file /etc/os-release | /usr/bin/sed -n 's/^ID="\{0,1\}\([^"]*\)"\{0
 os_ver=$(read_file /etc/os-release | /usr/bin/sed -n 's/^VERSION_ID="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' | /usr/bin/head -n 1)
 
 if [ -n "$os_name" ]; then
-  if [ "$os_id" = "arch" ] || [ "$os_id" = "archarm" ]; then
-    emit "system.os" system ok 0 "Operating system" "$os_name" \
-      "ID=$os_id VERSION_ID=${os_ver:-unknown}" ""
-  else
-    emit "system.os" system attention 1 "Operating system" "$os_name" \
-      "ID=$os_id VERSION_ID=${os_ver:-unknown}" \
-      "OmaDoctor targets Omarchy (Arch-based); this looks like a different distribution."
-  fi
+  # Omarchy's own /etc/os-release uses ID=omarchy; stock Arch uses ID=arch.
+  # Both are expected here. Anything else is worth a gentle nudge.
+  case "$os_id" in
+    omarchy | arch | archarm | manjaro)
+      emit "system.os" system ok 0 "Operating system" "$os_name" \
+        "ID=$os_id VERSION_ID=${os_ver:-unknown}" ""
+      ;;
+    *)
+      emit "system.os" system attention 1 "Operating system" "$os_name" \
+        "ID=$os_id VERSION_ID=${os_ver:-unknown}" \
+        "OmaDoctor targets Omarchy (Arch-based); this reports a different distribution, so some checks may not apply."
+      ;;
+  esac
 else
   emit "system.os" system info 0 "Operating system" "unknown" \
     "/etc/os-release is unreadable" ""
@@ -162,4 +165,4 @@ else
     "checkupdates not installed" ""
 fi
 
-printf '{"section":"system","checks":%s}\n' "$CHECKS"
+emit_json system "$MODE"

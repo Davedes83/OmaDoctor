@@ -39,21 +39,45 @@ jnum() {
   esac
 }
 
-# Emit the opening of a check array element.
-# check_open ID CATEGORY TITLE
-check_open() {
-  printf '{"id":%s,"category":%s,"title":%s,"status":%s,"severity":%s,"value":%s,"detail":%s,"suggestion":%s}' \
-    "$(jstr "$1")" "$(jstr "$2")" "$(jstr "$3")" \
-    "$(jstr "$STATUS")" "$(jstr "$SEVERITY")" \
-    "$(jstr "$VALUE")" "$(jstr "$DETAIL")" "$(jstr "$SUGGESTION")"
-}
-
 # check ID CATEGORY STATUS SEVERITY TITLE VALUE DETAIL SUGGESTION
 #
-# STATUS is one of: ok | info | attention | problem
+# Emits one check object. Field order in the JSON is deliberately
+# id, category, title, status, severity, value, detail, suggestion -- which is
+# NOT the argument order (status/severity precede title for readability at the
+# call site). Keep this mapping and the call sites in sync.
+#
+# STATUS   is one of: ok | info | attention | problem
 # SEVERITY is the internal weight: 0 (ok/info) | 1 (attention) | 3 (problem)
 check() {
-  check_open "$1" "$2" "$3" "$4" "$5" "$6" "$7"
+  printf '{"id":%s,"category":%s,"title":%s,"status":%s,"severity":%s,"value":%s,"detail":%s,"suggestion":%s}' \
+    "$(jstr "$1")" "$(jstr "$2")" "$(jstr "$5")" \
+    "$(jstr "$3")" "$(jnum "$4")" \
+    "$(jstr "$6")" "$(jstr "$7")" "$(jstr "$8")"
+}
+
+# Accumulate one check object into $CHECKS. This only appends a comma-separated
+# object; the enclosing [ ... ] is added once at print time by emit_json.
+# Do NOT try to bracket the first element here -- that makes every later append
+# re-close the array and produces [c1],c2],c3] garbage.
+emit() {
+  _c=$(check "$@")
+  if [ -z "$CHECKS" ]; then
+    CHECKS=$_c
+  else
+    CHECKS="$CHECKS,$_c"
+  fi
+}
+
+# Print the accumulated checks as JSON. $1 is the section name; $2 may be
+# "--checks-only" to emit the BARE comma-separated objects (no enclosing
+# brackets) so doctor.sh can concatenate several sections and wrap the result
+# in exactly one [ ... ].
+emit_json() {
+  if [ -z "$CHECKS" ]; then CHECKS=""; fi
+  case "${2:-}" in
+    --checks-only) printf '%s\n' "$CHECKS" ;;
+    *) printf '{"section":%s,"checks":[%s]}\n' "$(jstr "$1")" "$CHECKS" ;;
+  esac
 }
 
 # ------------------------------------------------------------------- probing
