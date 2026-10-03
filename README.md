@@ -128,6 +128,51 @@ differs between the two working forms: `<omarchy-shell> shell <method>` versus
 Available plugin methods: `runFullScan`, `copyReport`, `state` (returns the
 panel's live state as JSON), plus `open`, `close`, `show`, `hide` and `toggle`.
 
+## Ask AI
+
+The third action hands the redacted report to **your** AI and asks it to
+research each finding and propose a fix. It exists because the person reading a
+diagnostic report often does not already know the answer.
+
+**It uses your assistant, not a specific one.** On startup the plugin probes
+your `PATH` for `opencode`, `mods`, `llm`, `aichat`, `fabric`, `aider`,
+`gemini`, `claude`, `codex` and `ollama`, in that order, and uses the first one
+it finds. Anything it does not know about still works — see `askAiCommand`
+below. You can see what it resolved to from the button's tooltip, or:
+
+```sh
+qs ipc -p "$OMARCHY_PATH/shell" call davedes.omadoctor state | jq .ai
+```
+
+### Nothing is sent without you saying so
+
+This plugin's whole premise is that nothing leaves your machine, and an AI query
+does. So OmaDoctor **never** sends anything on its own initiative. Pressing
+**Ask AI** opens a sheet showing:
+
+- the exact command that will run,
+- whether it is a local model or a remote provider,
+- a preview of the text that will be sent, put through the same redactor as the
+  report.
+
+Then **Send**, **Copy** (puts the prompt on the clipboard instead, for pasting
+into anything), or **Esc**. If no supported CLI is found it says so and copies
+the prompt rather than doing nothing.
+
+The answer is written to `~/.local/state/omadoctor/ai-answer.txt` and put on
+the clipboard.
+
+### Settings
+
+| key | default | meaning |
+|---|---|---|
+| `askAiCommand` | `""` | full command line, e.g. `ollama run llama3.2`. The report is fed on **stdin**. Empty means auto-detect. |
+| `askAiModel` | `""` | model name, for assistants that require one. `ollama run` has no default-model mode. |
+
+Anything not in the built-in list works through `askAiCommand`. The command line
+is split into an argv and handed straight to the process — it is never passed to
+a shell, so nothing in it can be interpreted as syntax.
+
 ## Settings
 
 A bar widget's settings are the keys of its own entry in `shell.json`'s
@@ -143,6 +188,8 @@ at every value.
 |---|---|---|
 | `pollSeconds` | `0` | background scan interval. `0` disables it. |
 | `notifyOnProblem` | `true` | notify on a worsening transition |
+| `askAiCommand` | `""` | see [Ask AI](#ask-ai) |
+| `askAiModel` | `""` | see [Ask AI](#ask-ai) |
 
 The background poll defaults to **off**. A quick scan is a multi-process run of
 a couple of seconds, and doing that every 30 seconds forever on every monitor,
