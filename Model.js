@@ -156,6 +156,34 @@ function findCheck(checks, id) {
   return null
 }
 
+// ------------------------------------------------------------- display rows
+
+// findingRows(checks) -> a FLAT list of rows for the panel to render.
+//
+// Each entry is { kind: "header", category } or { kind: "check", check }.
+//
+// Flat rather than nested on purpose. A QML Repeater nested inside another
+// Repeater's delegate does not reliably see the outer delegate's modelData,
+// which silently produced category headers with no rows under them. One flat
+// list, one Repeater, no scoping to get wrong -- and it is testable here
+// rather than only on screen.
+//
+// Categories with nothing to report are omitted entirely, so the panel never
+// shows a heading above an empty list.
+function findingRows(checks) {
+  var rows = []
+  var buckets = byCategory(checks)
+  for (var i = 0; i < buckets.length; i++) {
+    var found = issues(buckets[i].checks)
+    if (found.length === 0) continue
+    rows.push({ kind: "header", category: str(buckets[i].category).toUpperCase() })
+    for (var j = 0; j < found.length; j++) {
+      rows.push({ kind: "check", check: found[j] })
+    }
+  }
+  return rows
+}
+
 // ------------------------------------------------------------------ formatting
 
 // fmtAge(tsSeconds, nowSeconds) -> human relative age, e.g. "3m ago".
@@ -213,14 +241,32 @@ function redact(text, opts) {
   // "::ffff:" prefix) and splits long addresses into a real prefix plus a
   // masked tail, e.g. "2001:db8::<ipv6>" -- which still leaks the prefix.
   //
-  // The pattern accepts both full (8-group) and compressed ("::") forms. The
-  // leading group is optional so bare "::1" matches; the trailing part allows
-  // an embedded IPv4 form. Boundaries are non-hex/non-colon on the left and
-  // non-hex/non-dot on the right, so "2001:db8::8a2e:370:7334" is consumed
-  // whole rather than up to its first dot.
+  // The patterns accept both full (8-group) and compressed ("::") forms, with
+  // the leading group optional so bare "::1" matches and the trailing part
+  // allowing an embedded IPv4 form. Boundaries are non-hex/non-colon on the
+  // left and non-hex/non-dot on the right, so "2001:db8::8a2e:370:7334" is
+  // consumed whole rather than up to its first dot.
+  //
+  // Both patterns run through maskIPv6, which rejects the clock-time shapes
+  // ("08:04:18", "1:2:3") that are hex-legal and would otherwise eat every
+  // timestamp in the report header. A real address either uses "::", or has
+  // 4+ groups, or carries a group that is not a bare 1-2 digit decimal --
+  // "2001:db8::1", "fe80:0:0:0:0:0:0:1", and "abcd:ef01:..." all do.
+  function maskIPv6(match) {
+    if (match.indexOf("::") !== -1) return "<ipv6>"
+    var groups = match.split(":")
+    if (groups.length >= 4) return "<ipv6>"
+    // 2 or 3 groups, no compression: only an address if some group is not a
+    // short decimal run ("0d 3h 57m" and "2.42 / 1.73" must survive).
+    for (var i = 0; i < groups.length; i++) {
+      if (!/^\d{1,2}$/.test(groups[i])) return "<ipv6>"
+    }
+    return match
+  }
+
   s = s.replace(
     /(?<![0-9a-fA-F:.])(?:[0-9a-fA-F]{1,4}:){2,}(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4})*|(?::[0-9a-fA-F]{1,4})+)|(?<![0-9a-fA-F:])(?:[0-9a-fA-F]{0,4}:){2,}[0-9a-fA-F]{0,4}(?![0-9a-fA-F:])/g,
-    "<ipv6>"
+    maskIPv6
   );
   // Compressed forms with few groups, e.g. "::1", "fe80::", "2001:db8::1".
   s = s.replace(/(?<![0-9a-fA-F:])(?:[0-9a-fA-F]{1,4})?::(?:[0-9a-fA-F]{1,4}){0,3}(?![0-9a-fA-F:])/g, "<ipv6>");

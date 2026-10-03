@@ -19,7 +19,7 @@ const src = fs.readFileSync(modelPath, "utf8");
 const EXPORTS = [
   "parseDoctor", "overallState", "issues", "counts", "byCategory",
   "findCheck", "fmtAge", "glyph", "stateLabel", "redact", "buildReport",
-  "buildReportText"
+  "buildReportText", "findingRows"
 ];
 
 const ctx = vm.createContext({ JSON, Math, String, Number, Array, Object, isFinite, Date });
@@ -143,6 +143,27 @@ eq("redact masks username", "user <user>", M.redact("user dave", { username: "da
 eq("redact masks home path", "~ is home", M.redact("/home/dave is home", { home: "/home/dave" }));
 eq("redact is idempotent", "<ipv6>", M.redact(M.redact("fe80::1", {}), {}));
 
+// Clock times are hex-legal, so the IPv6 patterns used to swallow them and
+// the report header rendered its own timestamp as "<ipv6>". A time has no
+// "::", fewer than four groups, and every group is a short decimal run.
+eq("redact keeps an h:mm:ss clock time", "08:04:18",
+  M.redact("08:04:18", {}));
+eq("redact keeps a short colon group run", "1:2:3", M.redact("1:2:3", {}));
+eq("redact keeps uptime text", "0d 3h 57m", M.redact("0d 3h 57m", {}));
+eq("redact keeps load-average slashes", "2.42 / 1.73 / 1.72",
+  M.redact("2.42 / 1.73 / 1.72", {}));
+eq("redact keeps a dated timestamp intact", "2026-10-03 08:04:18 UTC",
+  M.redact("2026-10-03 08:04:18 UTC", {}));
+
+// A 4+ group address with no "::" is still a real address and must be masked,
+// so the guard above cannot be satisfied by simply dropping the pattern.
+eq("redact masks uncompressed 8-group IPv6", "<ipv6>",
+  M.redact("fe80:0:0:0:0:0:0:1", {}));
+eq("redact masks a group that is not short-decimal", "<ipv6>",
+  M.redact("abcd:ef01:2345", {}));
+eq("redact masks the all-zero shorthand", "<ipv6>", M.redact("::", {}));
+eq("redact masks fe80 with empty tail", "<ipv6>", M.redact("fe80::", {}));
+
 // The original IP must not survive anywhere in a redacted report.
 const report = M.buildReport(goodScan ? parsed : null, {
   now: 1700000100,
@@ -195,6 +216,67 @@ if (M.buildReportText(JSON.stringify(goodScan), { now: 1700000100 }).includes("O
 } else {
   fail("buildReportText accepts raw JSON");
 }
+
+// The "Generated" line is generated from an ISO timestamp, so redaction used
+// to eat the time half of it and print "2026-10-03 <ipv6> UTC".
+const stamped = M.buildReport(goodScan ? parsed : null, { now: 1700000100 });
+if (!/<ipv6>/.test(stamped.split("\n").filter(function(l) {
+  return l.indexOf("Generated") === 0;
+}).join(" "))) {
+  ok("report keeps its own Generated timestamp");
+} else {
+  fail("report keeps its own Generated timestamp");
+}
+
+// ----------------------------------------------------------- findingRows
+//
+// findingRows is what the panel's single Repeater renders. It replaced a
+// nested Repeater that produced category headers with no rows under them,
+// because the inner delegate could not see the outer delegate's modelData.
+// These tests pin the flat shape so that regression cannot come back.
+
+const rowScan = {
+  checks: [
+    { id: "s.ok", category: "system", title: "OS", status: "ok", severity: 0, value: "Omarchy", detail: "", suggestion: "" },
+    { id: "s.bad", category: "system", title: "Failed services", status: "problem", severity: 3, value: "1 failed", detail: "d", suggestion: "s" },
+    { id: "a.warn", category: "audio", title: "Muted", status: "attention", severity: 1, value: "yes", detail: "", suggestion: "" },
+    { id: "a.ok", category: "audio", title: "Devices", status: "info", severity: 0, value: "2", detail: "", suggestion: "" },
+    { id: "t.ok", category: "storage", title: "Root", status: "ok", severity: 0, value: "40%", detail: "", suggestion: "" }
+  ]
+};
+const rows = M.findingRows(rowScan.checks);
+
+// Only categories with findings get a header: system and audio, not storage.
+eq("findingRows omits categories with nothing to report",
+  "SYSTEM,AUDIO", rows.filter(r => r.kind === "header").map(r => r.category).join(","));
+
+// Every header is immediately followed by at least one check -- the exact
+// shape the nested Repeater failed to produce.
+if (rows.filter(r => r.kind === "check").length === 2) {
+  ok("findingRows emits one check per finding");
+} else {
+  fail("findingRows emits one check per finding");
+}
+
+if (rows.length === 4 && rows[0].kind === "header" && rows[1].kind === "check"
+    && rows[2].kind === "header" && rows[3].kind === "check") {
+  ok("findingRows interleaves headers and checks in order");
+} else {
+  fail("findingRows interleaves headers and checks in order");
+}
+
+eq("findingRows carries the check payload on a check row",
+  "Failed services", (rows.filter(r => r.kind === "check")[0] || { check: {} }).check.title);
+
+eq("findingRows returns nothing for an all-clear scan",
+  0, M.findingRows([
+    { id: "a", category: "system", title: "OS", status: "ok", severity: 0, value: "x", detail: "", suggestion: "" },
+    { id: "b", category: "audio", title: "Info", status: "info", severity: 0, value: "y", detail: "", suggestion: "" }
+  ]).length);
+
+eq("findingRows tolerates empty input", 0, M.findingRows([]).length);
+eq("findingRows tolerates null input", 0, M.findingRows(null).length);
+eq("findingRows tolerates non-array input", 0, M.findingRows("nope").length);
 
 // ------------------------------------------------------------------- summary
 
