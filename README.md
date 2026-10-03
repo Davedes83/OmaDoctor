@@ -104,9 +104,51 @@ o.bind("SUPER + SHIFT + D", "Diagnose now",
   "quickshell ipc -p $OMARCHY_PATH/shell call davedes.omadoctor runFullScan")
 ```
 
-Note that `omarchy-shell shell call ...` does **not** reach a plugin's own IPC
-handler — it answers `unknown` and does nothing. The `toggle` method above is
-different: that one belongs to the shell itself, which is why it works.
+### The two IPC routes are not interchangeable
+
+Both of these look almost identical and only one of them works:
+
+```sh
+# WORKS -- omarchy's own shell methods (toggle/summon/hide)
+omarchy-shell shell toggle davedes.omadoctor
+
+# WORKS -- the plugin's own IPC handler, via qs ipc
+qs ipc -p "$OMARCHY_PATH/shell" call davedes.omadoctor runFullScan
+
+# DOES NOT WORK -- answers "unknown" and does nothing
+omarchy-shell shell call davedes.omadoctor runFullScan
+```
+
+`omarchy-shell shell call` dispatches to the **shell's** methods, and a bar
+widget is never registered there. The plugin's handler is reached through
+`qs ipc`, where the first argument is the IPC *target*. Note the word order
+differs between the two working forms: `<omarchy-shell> shell <method>` versus
+`qs ipc ... call <target> <method>`.
+
+Available plugin methods: `runFullScan`, `copyReport`, `state` (returns the
+panel's live state as JSON), plus `open`, `close`, `show`, `hide` and `toggle`.
+
+## Settings
+
+A bar widget's settings are the keys of its own entry in `shell.json`'s
+`bar.layout.<section>`, beside the `id` — never nested under a `settings:`
+sub-object, which arrives as `settings.settings.size` and silently does nothing
+at every value.
+
+```json
+{ "id": "davedes.omadoctor", "pollSeconds": 300, "notifyOnProblem": false }
+```
+
+| key | default | meaning |
+|---|---|---|
+| `pollSeconds` | `0` | background scan interval. `0` disables it. |
+| `notifyOnProblem` | `true` | notify on a worsening transition |
+
+The background poll defaults to **off**. A quick scan is a multi-process run of
+a couple of seconds, and doing that every 30 seconds forever on every monitor,
+purely to keep a bar glyph fresh, is the plugin's largest steady-state cost.
+Opening the panel still runs a full scan, so the only thing lost is background
+freshness.
 
 ### Notifications
 
@@ -155,15 +197,76 @@ want it, right after logging in. Two deliberate limits:
 
 Everything runs locally. There is no telemetry and nothing is uploaded.
 
-The copied report is redacted by default: hostname, username and home path are
-replaced, IPv4 addresses keep only the first two octets (`192.168.x.x`), MAC
-addresses become `<mac>`, and IPv6 addresses become `<ipv6>`. The redaction
-tests in `tests/model-tests.js` cover the awkward cases — IPv4-mapped addresses
-(`::ffff:192.168.1.1`), bare loopback (`::1`), and fully expanded addresses —
-along with the false positives that matter, so a timestamp or an uptime string
-is never mistaken for an address.
+The copied report is redacted by default. What is replaced:
+
+| | becomes |
+|---|---|
+| hostname (bare token) | `<host>` |
+| username, `/home/<user>` | `<user>`, `/home/<user>` |
+| `$HOME` | `~` |
+| `/root` | `~` |
+| `/mnt/<volume>`, `/media/<volume>` | `/mnt/<volume>` |
+| IPv4 | first two octets kept: `192.168.x.x` |
+| IPv6, including the zone suffix | `<ipv6>` |
+| IPv6 with an embedded IPv4 tail | `<ipv6>` |
+| MAC in colon, dash, Cisco, dotted-octet, underscore or bare-hex form | `<mac>` |
+| filesystem UUID | `<uuid>` |
+| disk / volume serial | `<serial>` |
+| SSID | `<ssid>` |
+| interface names (`enp0s31f6`, `wlp3s0`, or anything after `dev`) | `<iface>` |
+
+A **dotted** token equal to the hostname is treated as a domain and left alone.
+OmaDoctor's default hostname is literally `omarchy`, and the DNS evidence quotes
+the public site `omarchy.org`; masking that would destroy a fact about a
+website in order to redact a fact about your machine, leaving the report unable
+to say which lookup failed.
+
+Two shapes are deliberately **not** masked, because masking them was worse than
+leaving them:
+
+- `hyprland.lua:42:12` — `file:line:col`. An early IPv6 matcher accepted any
+  2- or 3-group colon run as an address and printed `hyprland.lu<ipv6>`, in a
+  report whose own advice is "open the file and line named in each error". An
+  uncompressed IPv6 is always exactly 8 groups and every compressed form
+  contains `::`, so the test is now exact.
+- `08:04:18`, `1:2:3` — clock times and versions.
+
+### When redaction cannot be complete
+
+If the plugin cannot determine one of the identifiers it needs, the report says
+so in its own header rather than quietly omitting the rule:
+
+```
+Redaction  : INCOMPLETE -- could not determine hostname. Read the report before sharing it.
+```
+
+This is not hypothetical defensive code. `HOSTNAME` is a shell variable, not an
+environment variable, so it is frequently absent from the process environment —
+verified on the machine this was developed on, whose shell process has no
+`HOSTNAME` at all. The plugin reads the hostname from
+`/proc/sys/kernel/hostname` for exactly this reason.
+
+## Requirements
+
+Everything below is present on a default Omarchy install, and every external
+command is invoked by absolute path or through a pinned `PATH`, so a missing one
+degrades a single check to `unknown` rather than breaking the scan.
+
+| dependency | used for | if absent |
+|---|---|---|
+| `coreutils` (`timeout`, `head`, `tr`, `sort`, `sed`, `awk`, `grep`) | every probe | the scan cannot run |
+| `jq` | history pruning and the test suite | history is not written; everything else works |
+| `wl-clipboard` | **Copy report** | the report is not copied |
+| a Nerd Font (JetBrains Mono Nerd Font, which Omarchy sets) | the bar glyph and panel icons | icons render as tofu |
+| `ping` (iputils) | latency and packet loss | `network.latency` reports `unavailable` |
 
 ## Installing
+
+```sh
+omarchy plugin add https://github.com/Davedes83/OmaDoctor.git --enable
+```
+
+Or manually:
 
 ```sh
 git clone https://github.com/Davedes83/OmaDoctor.git \
@@ -177,11 +280,83 @@ Then add it to the right-hand side of your bar in `~/.config/omarchy/shell.json`
 { "bar": { "layout": { "right": [{ "id": "davedes.omadoctor" }] } } }
 ```
 
+## The check contract
+
+Every section emits check objects. This is the whole interface between
+`backend/*.sh` and `Model.js`, and anything that does not match it is either
+normalised on the way in or reported as malformed.
+
+```jsonc
+{
+  "id": "display.modes",          // stable key; "what changed" diffs on this
+  "category": "display",          // section; drives grouping and report order
+  "title": "Modes",               // short human label for the row
+  "status": "attention",          // ok | info | attention | problem
+  "severity": 1,                  // 0 | 1 | 3 -- see below
+  "value": "unsupported mode set",// the reading, shown in the bar/row
+  "detail": "an output is running a mode it does not list as available",
+  "suggestion": "This is why a display can revert after a reconnect",
+  "details": ["affected: DP-2 at 1920x1080@60.00"],   // optional, multi-line evidence
+  "repair": {                     // optional, ADVICE ONLY -- never executed
+    "tier": "caution",            // safe | caution | manual
+    "label": "Adjust the monitor rule's mode",
+    "detail": "OmaDoctor never edits your monitor configuration"
+  }
+}
+```
+
+Two rules are load-bearing and both fail **closed**:
+
+- **`status`** is one of the four values above. Anything else becomes `problem`.
+  A malformed producer must not be able to make a finding disappear.
+- **`severity`** is authoritative when it is `1` or `3`. If a producer
+  contradicts itself, the more serious of the two wins. `0` means "not ranked"
+  and defers to `status`.
+
+`details` and `repair` are optional and purely additive: a check without them
+normalises to `[]` and `null`, so producers and renderers interoperate.
+
+An **empty** scan is `problem`, not `ok`. It means nothing was inspected, which
+at the UI layer is indistinguishable from "nothing is wrong" — so the panel
+reads `PROBLEM`, the notification is suppressed (there is no transition), and
+the report says so rather than claiming all clear.
+
+## Adding a section
+
+Five places, across three files. Missing any of them is how a section ends up
+invisible or how a scan gets killed mid-write.
+
+1. **`backend/<name>.sh`** — emit via the `check`/`checkd`/`checkr` helpers
+   from `common.sh`. Source `bootstrap.sh` *first*, then `common.sh`. Honour
+   `--checks-only` by passing it through to `emit_json`.
+2. **`backend/doctor.sh`** — add a deadline in `deadline_for()` and a
+   `add_section <name>` call.
+3. **`backend/doctor.sh`** — if the section belongs only to a full scan, add it
+   next to the `network` line, which is gated on `MODE`.
+4. **`Model.js`** — add the category to the `order` array in `byCategory()` if
+   it should not sort last. Unlisted categories still work.
+5. **`Panel.qml`** — raise `budgetFor()`. The outer `timeout` must exceed the
+   **sum** of the per-section deadlines, because `doctor.sh` runs them
+   sequentially. Its own comment says this; adding a section without raising it
+   is how a scan is killed mid-document and arrives unparseable.
+
+The test fixtures in `tests/backend-tests.sh` copy `doctor.sh`, `bootstrap.sh`
+and `common.sh` into a temp directory. If you add a new section, the fixtures
+that stub sections out do not need it, but any fixture that runs the real
+dispatcher does.
+
 ## Development
 
 ```sh
 tests/run-tests.sh              # shell suites + Model.js unit tests
 omarchy plugin validate .       # manifest and entry-point checks
+```
+
+The suites also run under other POSIX shells:
+
+```sh
+OMC_TEST_SH="bash --posix" tests/run-tests.sh
+OMC_TEST_SH="dash"           tests/run-tests.sh
 ```
 
 The split is deliberate: `backend/*.sh` emit JSON, `Model.js` does all the
