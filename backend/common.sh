@@ -21,22 +21,56 @@
 # ---------------------------------------------------------------- JSON output
 
 # jstr VALUE -> print a quoted, escaped JSON string.
+#
+# Every byte JSON forbids inside a string literal must be escaped here. Leaving
+# any of them raw makes the WHOLE document unparseable, and because the QML
+# layer treats an unparseable scan as "no scan", one odd byte anywhere in one
+# check silently discards every other finding. The reachable carriers are
+# directory names under $HOME (storage.big_dirs) and verbatim hyprctl
+# configerrors text (hyprland.config_errors), so this is not theoretical.
+#
+# Order matters: backslash and double quote first, then the control characters,
+# then newline flattening.
 jstr() {
   _s=$1
-  # Escape backslash and double quote first, then the control characters that
-  # would otherwise produce invalid JSON.
-  _s=$(printf '%s' "$_s" | /usr/bin/sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
-        -e 's/	/\\t/g' \
-        -e 's/\r/\\r/g' | /usr/bin/tr '\n' ' ')
+  _s=$(printf '%s' "$_s" | /usr/bin/sed \
+        -e 's/\\/\\\\/g' \
+        -e 's/"/\\"/g' \
+        -e 's/\x01/\\u0001/g' -e 's/\x02/\\u0002/g' \
+        -e 's/\x03/\\u0003/g' -e 's/\x04/\\u0004/g' \
+        -e 's/\x05/\\u0005/g' -e 's/\x06/\\u0006/g' \
+        -e 's/\x07/\\u0007/g' \
+        -e 's/\x08/\\b/g'    -e 's/\x09/\\t/g' \
+        -e 's/\x0a/\\n/g'    -e 's/\x0b/\\u000b/g' \
+        -e 's/\x0c/\\f/g'    -e 's/\x0d/\\r/g' \
+        -e 's/\x0e/\\u000e/g' -e 's/\x0f/\\u000f/g' \
+        -e 's/\x10/\\u0010/g' -e 's/\x11/\\u0011/g' \
+        -e 's/\x12/\\u0012/g' -e 's/\x13/\\u0013/g' \
+        -e 's/\x14/\\u0014/g' -e 's/\x15/\\u0015/g' \
+        -e 's/\x16/\\u0016/g' -e 's/\x17/\\u0017/g' \
+        -e 's/\x18/\\u0018/g' -e 's/\x19/\\u0019/g' \
+        -e 's/\x1a/\\u001a/g' -e 's/\x1b/\\u001b/g' \
+        -e 's/\x1c/\\u001c/g' -e 's/\x1d/\\u001d/g' \
+        -e 's/\x1e/\\u001e/g' -e 's/\x1f/\\u001f/g' \
+        -e 's/\x7f/\\u007f/g')
   printf '"%s"' "$_s"
 }
 
-# jnum VALUE -> print a JSON number, or null when the value is not numeric.
+# jnum VALUE -> print a JSON number, or null when the value is not a JSON number.
+#
+# A glob character-class test is not sufficient: it also admits "-", ".", "5.",
+# ".5", "1.2.3", "1.-2" and, if you let it, "+5" and "007" -- none of which are
+# JSON numbers. Anything that reaches the output document must survive
+# JSON.parse, so this matches the JSON number grammar exactly and returns null
+# for everything else:
+#
+#   -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
 jnum() {
-  case "$1" in
-    '' | *[!0-9.-]*) printf 'null' ;;
-    *) printf '%s' "$1" ;;
-  esac
+  OMADOCTOR_JNUM=$1 /usr/bin/awk 'BEGIN {
+    num = "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?$"
+    v = ENVIRON["OMADOCTOR_JNUM"]
+    print (v ~ num) ? v : "null"
+  }'
 }
 
 # check ID CATEGORY STATUS SEVERITY TITLE VALUE DETAIL SUGGESTION
@@ -182,16 +216,6 @@ have() {
   command -v "$1" >/dev/null 2>&1
 }
 
-# trim VALUE -> strip leading/trailing whitespace.
-trim() {
-  printf '%s' "$1" | /usr/bin/sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
-}
-
-# first_line VALUE -> first newline-delimited line of VALUE.
-first_line() {
-  printf '%s' "$1" | /usr/bin/head -n 1
-}
-
 # read_file PATH -> contents of PATH, or the empty string when unreadable.
 read_file() {
   [ -r "$1" ] || return 1
@@ -225,11 +249,22 @@ fs_usage_percent() {
 }
 
 # severity_for_pct PCT -> map a used-percentage to (SEVERITY STATUS).
-# Thresholds: <80 ok | 80-90 attention | >90 warning | >95 critical(problem)
+# Thresholds: <80 ok | 80-90 attention | >90 problem | >95 problem
 # Sets the globals SEVERITY and STATUS.
+#
+# An unreadable percentage is NOT "ok". Returning ok for an absent value is how
+# a failed `df` ends up reporting a filesystem as healthy, which is the exact
+# "a missing check must never be mistaken for a healthy one" failure this
+# dispatcher documents. Callers must therefore treat a non-numeric argument as
+# a reason to emit info/unknown, not as a passing measurement.
 severity_for_pct() {
   case "$1" in
-    '' | *[!0-9]*) SEVERITY=0; STATUS=ok; SUGGESTION="" ;;
+    '' | *[!0-9]*)
+      SEVERITY=0
+      STATUS=unknown
+      SUGGESTION=""
+      return 1
+      ;;
     *)
       if [ "$1" -ge 95 ]; then
         SEVERITY=3; STATUS=problem
@@ -243,6 +278,79 @@ severity_for_pct() {
       else
         SEVERITY=0; STATUS=ok; SUGGESTION=""
       fi
+      return 0
       ;;
   esac
+}
+
+# ------------------------------------------------------------ JSON validation
+
+# json_fragment_ok FRAGMENT -> true when "[FRAGMENT]" is a syntactically
+# well-formed JSON array.
+#
+# WHY: doctor.sh concatenates sections by hand. A section that is truncated
+# mid-write (SIGTERM landing between stdio flushes -- the section payload is
+# above the 4096-byte stdio buffer, so multiple flushes are routine) or that
+# emits a nested array produces output which, once spliced in, makes the ENTIRE
+# merged document unparseable. The QML layer then reports "could not read scan
+# output" and every other section's findings are lost, so one misbehaving
+# section must be detected and isolated rather than concatenated.
+#
+# WHY awk and not jq: this has to work on exactly the machine being diagnosed,
+# including a minimal install with no jq. It is a structural check only -- it
+# does not validate the schema -- which is all that is needed to catch the
+# failure modes above.
+json_fragment_ok() {
+  # Every element must be a check object, and a check object always carries an
+  # "id". Requiring it catches the one remaining way a section can be
+  # well-formed JSON yet still wrong for the merge: a section invoked WITHOUT
+  # --checks-only emits a whole {"section":..,"checks":[..]} document, which
+  # splices into the array as an element with no id -- unkeyable and
+  # unreportable, breaking every consumer.
+  case "$1" in
+    *'"id"'*) ;;
+    *) return 1 ;;
+  esac
+  printf '%s' "$1" | /usr/bin/awk '
+    BEGIN { depth = 0; instr = 0; esc = 0; bad = 0; lines = 0; state = 0 }
+    {
+      lines++
+      if (lines > 1) bad = 1
+      s = $0
+      n = length(s)
+      for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (instr) {
+          if (esc) { esc = 0 }
+          else if (c == "\\") { esc = 1 }
+          else if (c == "\"") { instr = 0 }
+          else if (c >= "\001" && c <= "\037") { bad = 1 }
+          continue
+        }
+        if (c == " " || c == "\t") continue
+        # state 0 = expecting the start of an element object
+        # state 1 = inside an element object
+        # state 2 = just closed an element; a "," or the end is all that is
+        #           allowed, which is what rejects a trailing comma
+        if (state == 0) {
+          if (c == "{") { depth = 1; state = 1 }
+          else bad = 1
+          continue
+        }
+        if (state == 2) {
+          if (c == ",") state = 0
+          else bad = 1
+          continue
+        }
+        if (c == "\"") instr = 1
+        else if (c == "{" || c == "[") depth++
+        else if (c == "}" || c == "]") {
+          depth--
+          if (depth == 0) state = 2
+          else if (depth < 0) bad = 1
+        }
+      }
+    }
+    END { exit (bad || instr || state != 2) ? 1 : 0 }
+  '
 }

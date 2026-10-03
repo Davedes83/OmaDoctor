@@ -43,15 +43,31 @@ fi
 # to the parsers, and every check below then reports "unknown". An absent
 # signature must never surface as "Hyprland is not running": the compositor may
 # be perfectly healthy in a session this process simply cannot see.
+#
+# A STALE signature is the same hazard with worse consequences, because hyprctl
+# then prints "Couldn't connect to .../.socket.sock. (4)" on stdout and exits 4.
+# Two independent guards are required and both are used: the banner text (which
+# hypr_hyprland_error matches) and the exit status. Either alone is sufficient
+# here, but the exit status is the authoritative one and costs nothing.
 hypr_query() {
   if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
     return 1
   fi
   _hq_out=$(/usr/bin/hyprctl "$1" 2>/dev/null)
+  _hq_rc=$?
+  if [ "$_hq_rc" -ne 0 ]; then
+    _hq_out=""
+    return 1
+  fi
   if hypr_hyprland_error "$_hq_out"; then
     return 1
   fi
-  printf '%s' "$_hq_out"
+  # Strip ASCII control bytes before the text reaches a parser or a value.
+  # jstr() would escape them anyway, but hyprctl configerrors carries the user's
+  # own config text verbatim, so sanitising at the boundary keeps the parsers
+  # and the displayed evidence clean at source rather than relying on every
+  # downstream consumer. Bytes >= 0x80 are preserved -- see the helper.
+  hypr_clean_multiline "$_hq_out"
 }
 
 # ------------------------------------------------------------ compositor
@@ -112,6 +128,30 @@ else
     "Run: hyprctl monitors"
 fi
 
+# ---------------------------------------------------------------- workspaces
+
+# A cheap, genuinely useful addition: hypr_workspace_count already existed in
+# the parser (fully covered by tests/hyprctl-tests.sh) but nothing ever called
+# it, so there was no workspace check at all. A workspace count that disagrees
+# with what the user sees is the signature of a workspace-per-monitor rule
+# problem, which is one of the recurring Hyprland complaints OmaDoctor exists to
+# explain.
+if _hl_ws=$(hypr_query workspaces); then
+  if _hl_wcount=$(hypr_workspace_count "$_hl_ws"); then
+    emitd "hyprland.workspaces" hyprland ok 0 "Workspaces" "$_hl_wcount" \
+      "$_hl_wcount workspace(s) reported by Hyprland" \
+      "A count that does not match what you see usually means a workspace rule is not applying" \
+      "workspaces: $_hl_wcount"
+  else
+    emit "hyprland.workspaces" hyprland info 0 "Workspaces" "unknown" \
+      "hyprctl reported no readable workspaces" ""
+  fi
+else
+  emit "hyprland.workspaces" hyprland info 0 "Workspaces" "unknown" \
+    "could not read the workspace list" \
+    "Run: hyprctl workspaces"
+fi
+
 # --------------------------------------------------------- config errors
 
 # The plan's headline Hyprland feature: this is information users otherwise
@@ -128,11 +168,22 @@ if _hl_cfg=$(hypr_query configerrors); then
       # `set --` would word-split each error line into separate words, so the
       # per-line boundary is lost. Instead the capped lines are read into
       # positional parameters one LINE at a time using IFS=newline.
+      #
+      # The command substitution is still unquoted (that is what performs the
+      # splitting) so it ALSO glob-expands each error line against the current
+      # directory. Real config-error lines all contain '/' or ':' and match
+      # nothing, so it is currently harmless -- but a line that happened to be a
+      # bare wildcard would be replaced by matching filenames, silently
+      # corrupting the evidence the user is meant to read. `set -f` disables
+      # globbing for the duration; it is restored immediately after, and this
+      # script has no other use for pathname expansion.
+      set -f
       IFS='
 '
       # shellcheck disable=SC2086
       set -- $(hypr_config_errors "$_hl_cfg" | /usr/bin/head -n 10)
       unset IFS
+      set +f
       emitr "hyprland.config_errors" hyprland problem 3 "Configuration" \
         "$_hl_ecount error(s)" \
         "Hyprland reported $_hl_ecount configuration error(s)" \

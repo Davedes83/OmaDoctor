@@ -33,20 +33,49 @@
 # hypr_hyprland_error TEXT -> true when TEXT is one of hyprctl's failure
 # banners rather than data.
 #
-# These are matched case-insensitively and on a lowercased copy, because the
-# two "not set" wordings differ between hyprctl versions. The exit status is
-# useless here (0 in both cases), so this check is the only way to tell.
+# Matched case-insensitively on a lowercased copy, because the "not set"
+# wordings differ between hyprctl versions.
+#
+# There are THREE failure banners plus one exit-status signal, and all four
+# were verified against Hyprland 0.56.2:
+#
+#   * unknown subcommand    -> "unknown request"                              exit 0
+#   * no instance signature -> "HYPRLAND_INSTANCE_SIGNATURE not set! (is
+#                              hyprland running?)"                             exit 1
+#   * STALE signature (the
+#     signature names a
+#     socket that no
+#     longer exists)       -> "Couldn't connect to /run/user/1000/hypr/<sig>/
+#                              .socket.sock. (4)"                              exit 4
+#   * older builds         -> "... was not set! (Is Hyprland running?)",
+#                              "error while ..."
+#
+# The stale-signature case is the dangerous one: it arrives on STDOUT, so a
+# parser that only pattern-matches the older wordings reads a socket error as a
+# monitor list and reports "your display is off". Callers must therefore ALSO
+# test hyprctl's exit status; see hypr_query in backend/hyprland.sh.
 hypr_hyprland_error() {
-  printf '%s' "$1" | /usr/bin/grep -qiE 'unknown request|hyprland_instance_signature|is hyprland running|error while'
+  printf '%s' "$1" | /usr/bin/grep -qiE \
+    "unknown request|hyprland_instance_signature|is hyprland running|error while|couldn't connect to|socket\.sock|no such file or directory"
 }
 
-# hypr_clean_multiline TEXT -> TEXT with non-printable-ASCII bytes removed.
+# hypr_clean_multiline TEXT -> TEXT with ASCII control bytes removed.
 #
-# The bootstrap pins LC_ALL=C, where any UTF-8 multi-byte character is just
-# bytes >= 0x80. Dropping them keeps the parsers independent of both the locale
-# and any literal box-drawing character.
+# Control bytes are stripped because they cannot survive a JSON string literal
+# and must never reach a value. Bytes >= 0x80 are DELIBERATELY KEPT: under
+# LC_ALL=C a UTF-8 multi-byte character is simply several bytes >= 0x80, so
+# deleting them would silently turn "Beyerdynamic DT 770 Pro (80 Ω)" into
+# "... (80 )" and mangle every non-English device name. jstr() escapes the
+# control bytes and passes valid UTF-8 through untouched -- JSON permits raw
+# multi-byte UTF-8 in a string.
+#
+# NEWLINE (0x0A) and TAB (0x0B is vertical tab; 0x09 is tab) are PRESERVED.
+# The first version of this helper used \000-\037, which included the newline,
+# so it silently flattened the whole document onto one line -- every
+# line-oriented parser downstream then saw no monitor blocks at all and
+# reported "no displays". That is why it sat unused. It is now range-excluded.
 hypr_clean_multiline() {
-  printf '%s\n' "$1" | /usr/bin/tr -d '\000-\037\177-\377'
+  printf '%s\n' "$1" | /usr/bin/tr -d '\000-\010\013-\015\016-\037\177'
 }
 
 # ------------------------------------------------------------- monitors

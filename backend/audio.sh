@@ -7,6 +7,11 @@
 # Read-only. Queries the user session's PipeWire/WirePlumber state via wpctl and
 # systemctl --user. Never restarts a service -- restarting audio is a repair
 # action and is out of scope for this read-only milestone.
+# bootstrap.sh is sourced FIRST so that running this section directly -- which
+# is exactly what its own failure messages tell the user to do -- gets the
+# same pinned PATH, umask and locale as a dispatcher-driven run. Without it,
+# a shadow executable anywhere on the caller's PATH is resolved here.
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/bootstrap.sh"
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/common.sh"
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/wpctl-parse.sh"
 
@@ -37,6 +42,14 @@ elif [ "$pipewire" = "active" ] && [ "$wplumber" = "active" ]; then
 elif [ "$pipewire" = "active" ]; then
   emit "audio.server" audio attention 1 "Audio server" "degraded" "$server_detail" \
     "WirePlumber is not running; device routing and volume control will misbehave."
+elif [ "$pipewire" = "unknown" ] || [ "$wplumber" = "unknown" ]; then
+  # systemctl could not answer -- no user session, a nested session, a test
+  # harness. Asserting "not running" here would claim certainty the detail line
+  # contradicts three times over ("pipewire=unknown ..."). Every other section
+  # degrades an unreadable probe to info; audio must not be the outlier.
+  emit "audio.server" audio info 0 "Audio server" "unknown" "$server_detail" \
+    "The user session did not answer systemctl --user" \
+    "Expected outside a logged-in desktop session"
 else
   emit "audio.server" audio problem 3 "Audio server" "not running" "$server_detail" \
     "Audio will not work at all. Restart it with: systemctl --user restart pipewire wireplumber"
@@ -120,10 +133,33 @@ if have wpctl; then
   fi
 
   # ------------------------------------------------------------ device count
-  devs=$(printf '%s\n' "$wpstatus" | /usr/bin/grep -cE '^[[:space:]]+(Sinks|Sources):|Device' || true)
+  # Count the ENTRIES inside the "Devices:" sections, not section headers.
+  # The previous expression matched the headers themselves, so it reported the
+  # number of "Devices:"/"Sinks:"/"Sources:" labels (3) as if it were a
+  # measurement of hardware (the real answer here is 4: two audio devices and
+  # two cameras). A fabricated count presented as a reading is worse than no
+  # count at all.
+  #
+  # wpctl draws its tree with box characters, so an entry line is
+  # "<box>      48. Name" -- the digits do NOT follow the leading whitespace.
+  # The header is matched by stripping leading decoration and requiring exactly
+  # "Devices:", which deliberately excludes "Default Configured Devices:"
+  # (those entries are routes, not hardware).
+  devs=$(printf '%s\n' "$wpstatus" | /usr/bin/awk '
+    { t = $0
+      sub(/^[ \t]+/, "", t)
+      if (t ~ /^[^0-9*].*:$/) {
+        h = t; sub(/^[^A-Za-z]*/, "", h)
+        indev = (h == "Devices:")
+        next
+      }
+      if (indev && t ~ /^[^0-9]*[0-9]+\./) n++
+    }
+    END { print n + 0 }
+  ')
   case "$devs" in '' | *[!0-9]*) devs=0 ;; esac
   emit "audio.devices" audio info 0 "Devices" "$devs" \
-    "entries reported by wpctl status" ""
+    "hardware entries reported by wpctl status" ""
 else
   emit "audio.devices" audio info 0 "Audio devices" "unknown" \
     "wpctl (wireplumber) not installed" \

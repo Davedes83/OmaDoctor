@@ -13,6 +13,11 @@
 # send datagram ICMP unprivileged. When it is unavailable the checks degrade to
 # "info" rather than reporting a false failure -- an unknown result is not the
 # same as a bad one.
+# bootstrap.sh is sourced FIRST so that running this section directly -- which
+# is exactly what its own failure messages tell the user to do -- gets the
+# same pinned PATH, umask and locale as a dispatcher-driven run. Without it,
+# a shadow executable anywhere on the caller's PATH is resolved here.
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/bootstrap.sh"
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/common.sh"
 
 MODE=${1:-}
@@ -206,6 +211,16 @@ if [ -n "$PING_AVG" ]; then
       fi
       ;;
   esac
+else
+  # PING_AVG is empty in three ordinary situations: ping is not installed, ping
+  # produced no parsable output, or ICMP is blocked. On a default-deny firewall
+  # that is the NORMAL state, and this is exactly where a latency reading would
+  # be most useful -- so the check must be reported as unavailable, not dropped.
+  # Silently omitting it makes "latency is fine" and "latency is unknown"
+  # indistinguishable in the summary counts.
+  emit "network.latency" network info 0 "Latency" "unavailable" \
+    "ICMP is blocked or ping(8) is not installed" \
+    "Latency needs ICMP; a blocked firewall usually explains this"
 fi
 
 emit_json network "$MODE"

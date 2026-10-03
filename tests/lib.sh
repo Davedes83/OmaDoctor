@@ -3,6 +3,17 @@
 # POSIX-only so the suites run under sh, bash and bash --posix identically.
 # Sourced by tests/*-tests.sh.
 
+# Reproduce the environment backend/bootstrap.sh guarantees for every run.
+#
+# This is not cosmetic. The parsers match raw bytes and rely on LC_ALL=C:
+# box-drawing characters are three bytes E2 94 80.. there, and their stripping
+# is expressed as byte-value octal ranges that a UTF-8 awk REJECTS as an
+# invalid range endpoint. Running the suite under the ambient locale therefore
+# failed on exactly the code the tests exist to pin. Pinning here also makes
+# every assertion deterministic regardless of the developer's locale.
+LC_ALL=C
+export LC_ALL
+
 : "${OMC_TEST_SH:=sh}"
 
 CHECKS=0

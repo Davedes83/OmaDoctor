@@ -183,7 +183,9 @@ check_eq "no section-failure placeholders on a healthy run" "0" "$failed"
 # Drive the real failure paths by pointing a copy of the dispatcher at sections
 # that cannot run. This is the check that keeps "healthy" trustworthy.
 BROKEN=$(mktemp -d)
-cp "$BACKEND_DIR/doctor.sh" "$BACKEND_DIR/bootstrap.sh" "$BROKEN/" 2>/dev/null
+# common.sh is required: doctor.sh sources it for check() and
+# json_fragment_ok(), not just bootstrap.sh.
+cp "$BACKEND_DIR/doctor.sh" "$BACKEND_DIR/bootstrap.sh" "$BACKEND_DIR/common.sh" "$BROKEN/" 2>/dev/null
 printf '#!/bin/sh\nexit 3\n' > "$BROKEN/sysinfo.sh"
 : > "$BROKEN/audio.sh"
 : > "$BROKEN/storage.sh"
@@ -201,7 +203,7 @@ fi
 
 # A section that produces no output at all must also be flagged.
 SILENT=$(mktemp -d)
-cp "$BACKEND_DIR/doctor.sh" "$BACKEND_DIR/bootstrap.sh" "$SILENT/" 2>/dev/null
+cp "$BACKEND_DIR/doctor.sh" "$BACKEND_DIR/bootstrap.sh" "$BACKEND_DIR/common.sh" "$SILENT/" 2>/dev/null
 printf '#!/bin/sh\nprintf ""\n' > "$SILENT/sysinfo.sh"
 : > "$SILENT/audio.sh"
 : > "$SILENT/storage.sh"

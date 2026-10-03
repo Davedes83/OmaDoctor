@@ -24,13 +24,32 @@
 # source -- a starred line that is not an audio device at all.
 wp_default_node() {
   printf '%s\n' "$1" | /usr/bin/awk -v want="$2" '
-    # Tree-drawing characters are multi-byte UTF-8. The bootstrap pins LC_ALL=C,
-    # where they are just bytes >= 0x80, so dropping every non-printable-ASCII
-    # byte removes them without depending on the locale or on matching a
-    # literal box-drawing character.
+    # Locale-proof cleaning.
+    #
+    # wpctl draws its tree with box-drawing characters, so a node line looks
+    # like "\u2502  *  58. Name [vol: 0.45]" -- decoration, then the star.
+    # That decoration is removed by MATCHING a leading run of non-ASCII
+    # characters, not by deleting bytes.
+    #
+    # The earlier implementation deleted every byte outside 0x20-0x7E. Under
+    # the pinned LC_ALL=C a UTF-8 character is several such bytes, so that
+    # silently destroyed the non-ASCII part of any device name:
+    # "Beyerdynamic DT 770 Pro (80 \u03a9)" was reported as
+    # "... (80 )" at status ok, and any CJK or emoji name was mangled beyond
+    # recognition while still being presented as a healthy measurement.
+    #
+    # Expressing the strip as octal BYTE ranges instead (\342[\224-\227]...)
+    # is worse: those are not valid range endpoints in a UTF-8 locale, where awk
+    # reads them as code points, so the whole parser failed to compile. A
+    # bracket that means "not printable ASCII" is valid and equivalent in every
+    # locale -- bytes in C, code points otherwise.
     function clean(s) {
-      gsub(/[^\040-\176]/, "", s)
-      sub(/^[ \t]+/, "", s)
+      gsub(/[\001-\037\177]/, "", s)
+      # Decoration and indent are interleaved: " <box><box>  *  58. Name".
+      # One repeated class over "space, tab, or non-ASCII" consumes the lot in
+      # any order. "*" is printable ASCII, so the star that marks the default
+      # node always survives.
+      sub(/^([ \t]|[^\040-\177])+/, "", s)
       sub(/[ \t]+$/, "", s)
       return s
     }
@@ -38,7 +57,7 @@ wp_default_node() {
     {
       # A top-level heading (no tree character, starts with a letter) that is
       # not "Audio" ends the Audio graph we care about.
-      if ($0 !~ /[^\040-\176]/ && $0 ~ /^[A-Za-z]/ && clean($0) != "Audio" && inaudio) {
+      if ($0 !~ /[^\040-\177]/ && $0 ~ /^[A-Za-z]/ && clean($0) != "Audio" && inaudio) {
         inaudio = 0
       }
       if (!inaudio) {

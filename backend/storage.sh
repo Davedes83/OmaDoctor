@@ -6,6 +6,11 @@
 #
 # Read-only. Uses df -P so each filesystem is guaranteed single-line
 # (POSIX format), which keeps parsing unambiguous.
+# bootstrap.sh is sourced FIRST so that running this section directly -- which
+# is exactly what its own failure messages tell the user to do -- gets the
+# same pinned PATH, umask and locale as a dispatcher-driven run. Without it,
+# a shadow executable anywhere on the caller's PATH is resolved here.
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/bootstrap.sh"
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/common.sh"
 
 MODE=${1:-}
@@ -105,33 +110,70 @@ else
 fi
 
 # ---------------------------------------------------------------- read-only root
-if [ -w / ] || touch / 2>/dev/null; then
-  emit "storage.root_writable" storage problem 3 "Root filesystem" "writable" \
-    "/ accepts writes as $(id -un 2>/dev/null)" \
-    "Unexpected for a hardened system; confirm this is intentional."
-else
-  emit "storage.root_writable" storage ok 0 "Root filesystem" "read-only" \
-    "/ correctly refuses writes" ""
-fi
+# Read the mount option rather than attempting a write. `touch /` mutates the
+# mtime and atime of / when it succeeds, which contradicts the read-only claim
+# every file header in this directory makes, and on a hardened system it fails
+# for the wrong reason (an ordinary user cannot write / for many reasons that
+# have nothing to do with the root mount being writable).
+_root_opts=$(/usr/bin/findmnt -no OPTIONS / 2>/dev/null)
+case "$_root_opts" in
+  '' | *[!a-z]*)
+    emit "storage.root_writable" storage info 0 "Root filesystem" "unknown" \
+      "findmnt did not report options for /" ""
+    ;;
+  *ro*)
+    emit "storage.root_writable" storage ok 0 "Root filesystem" "read-only" \
+      "/ is mounted read-only" ""
+    ;;
+  *)
+    emit "storage.root_writable" storage attention 1 "Root filesystem" "writable" \
+      "/ is mounted rw" \
+      "Expected for a desktop root filesystem; confirm this is intentional."
+    ;;
+esac
 
 # ---------------------------------------------------------------- largest dirs
 # Bounded: depth-1 only under $HOME, behind a hard timeout, so this cannot
 # become a long-running full-filesystem walk inside the long-lived shell.
+#
+# `du -0` is load-bearing. Two bugs came from parsing its default output:
+#
+#   * `awk 'NR>1'` assumed the $HOME total is the FIRST line. It is not --
+#     GNU du emits it last -- so this silently dropped whichever real directory
+#     happened to be walked first, and on a small $HOME that was the largest
+#     one. The total is now matched by path instead of by line number.
+#   * `$1" "$2` split on whitespace, so a directory named "my dir" was reported
+#     as the non-existent path "~/my" with its size attached to it. `du -0`
+#     emits NUL-terminated "<size>TAB<path>" records, and splitting at the
+#     FIRST tab leaves spaces (and anything else) inside the path intact.
+#
+# The count is derived from the same records that are displayed, so the two can
+# no longer disagree.
 if have du; then
-  raw=$(/usr/bin/timeout -k 2 8 /usr/bin/du -x -m -d 1 "$_home" 2>/dev/null \
-        | /usr/bin/awk 'NR>1 {print $1" "$2}' | /usr/bin/sort -rn | /usr/bin/head -n 3)
+  raw=$(/usr/bin/timeout -k 2 8 /usr/bin/du -x -m -d 1 -0 "$_home" 2>/dev/null \
+        | /usr/bin/awk -v RS='\0' -v home="$_home" '
+            NF >= 1 {
+              i = index($0, "\t")
+              if (i == 0) next
+              sz = substr($0, 1, i - 1)
+              p = substr($0, i + 1)
+              if (p == home) next
+              printf "%d\t%s\n", sz + 0, p
+            }
+          ' | /usr/bin/sort -rn | /usr/bin/head -n 3)
   if [ -n "$raw" ]; then
     # Build the summary with a single awk pass rather than a `while read`
     # pipeline: a pipeline body runs in a subshell, so any variable it set
     # would be discarded before the emit below.
     pretty=$(printf '%s\n' "$raw" | /usr/bin/awk -v home="$_home" '
       NF >= 2 {
-        p = $2
-        if (p == home) next
+        sz = $1
+        p = $0
+        sub(/^[^\t]*\t/, "", p)
         if (index(p, home) == 1) p = "~" substr(p, length(home) + 1)
-        printf "%s%s %sM", (n++ ? ", " : ""), p, $1
+        printf "%s%s %sM", (n++ ? ", " : ""), p, sz
       }
-      END { if (n) printf ""; else exit 1 }
+      END { if (!n) exit 1 }
     ' 2>/dev/null)
     if [ -n "$pretty" ]; then
       count=$(printf '%s\n' "$raw" | /usr/bin/awk 'NF>=2' | /usr/bin/wc -l | /usr/bin/tr -d ' ')

@@ -12,10 +12,16 @@
 #   {"mode":"quick","ts":<epoch>,"version":"0.1.0","checks":[ ... ]}
 # with --checks-only, just the array.
 #
-# Every section is invoked behind its own timeout. A section that times out or
-# crashes contributes an explicit problem check rather than vanishing --
-# a missing check must never be mistaken for a healthy one.
+# Every section is invoked behind its own timeout. A section that times out,
+# crashes, exits non-zero or emits malformed output contributes an explicit
+# problem check rather than vanishing -- a missing check must never be mistaken
+# for a healthy one.
+#
+# common.sh is sourced for check(), jstr() and json_fragment_ok(). It is
+# deliberately NOT sourced by the section scripts through this file: each
+# section is a separate process that sources it itself.
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/bootstrap.sh"
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/common.sh"
 
 VERSION="0.5.0"
 
@@ -48,24 +54,83 @@ deadline_for() {
 CHECKS=""
 SECTIONS=""
 
+# section_failure NAME VALUE DETAIL SUGGESTION -> a bare check object marking a
+# section as unusable. Emitted INSTEAD of that section's own output, never
+# alongside it: a partial section that died half-way through has not been shown
+# to be complete, and reporting its surviving checks as a clean section is the
+# failure this file exists to prevent.
+section_failure() {
+  check "$1.section" "$1" problem 3 "Section" "$2" "$3" "$4"
+}
+
 add_section() {
   _name=$1
   _script="$DIR/$_name.sh"
   _budget=$(deadline_for "$_name")
+  _run_hint="Run it directly to see the error: sh $DIR/$_name.sh"
+
+  # Sections learn the scan mode from the environment rather than from argv:
+  # argv[1] is already spoken for by --checks-only, and a mode flag there would
+  # be one more magic string that a caller can get wrong (see the note in
+  # common.sh's emit_json). Only checkupdates consumes it today, but "cheap
+  # local-only" vs "everything, including the network" is a distinction more
+  # probes will want to make.
+  OMADOCTOR_MODE=$MODE
+  export OMADOCTOR_MODE
 
   if [ ! -r "$_script" ]; then
-    arr=$(printf '{"id":"%s.section","category":"%s","title":"Section","status":"problem","severity":3,"value":"missing","detail":"%s.sh not found","suggestion":"Reinstall or update the plugin."}' \
-          "$_name" "$_name" "$_name")
+    arr=$(section_failure "$_name" "missing" "$_name.sh not found" \
+      "Reinstall or update the plugin.")
   else
     # Each section writes JSON to stdout only; stderr is discarded so a noisy
     # probe cannot corrupt the document.
     arr=$(/usr/bin/timeout -k 2 "$_budget" /bin/sh "$_script" --checks-only 2>/dev/null)
+    _rc=$?
     # The section may have emitted its own trailing newline; strip it so the
     # concatenation below never introduces a break inside the array.
     arr=$(printf '%s' "$arr" | /usr/bin/tr -d '\n')
+
     if [ -z "$(printf '%s' "$arr" | /usr/bin/tr -d ' \n')" ]; then
-      arr=$(printf '{"id":"%s.section","category":"%s","title":"Section","status":"problem","severity":3,"value":"failed","detail":"%s.sh produced no output or exceeded %ss","suggestion":"Run it directly to see the error: sh %s/%s.sh"}' \
-            "$_name" "$_name" "$_name" "$_budget" "$DIR" "$_name")
+      # Distinguish "was killed at its deadline" from "produced nothing".
+      # 124 is timeout(1)'s "timed out"; 137 is the SIGKILL that follows when
+      # the -k grace period is also exceeded. Both are real answers about this
+      # machine, not code defects, so they are reported as such.
+      case "$_rc" in
+        124 | 137)
+          arr=$(section_failure "$_name" "timed out" \
+            "$_name.sh exceeded its ${_budget}s deadline and was killed" \
+            "This usually means a probe it depends on hung. $_run_hint")
+          ;;
+        *)
+          arr=$(section_failure "$_name" "failed" \
+            "$_name.sh produced no output (exit $_rc)" "$_run_hint")
+          ;;
+      esac
+    elif [ "$_rc" -ne 0 ]; then
+      # A section can emit well-formed checks and THEN die -- a wedged
+      # compositor, a hung systemd call, an OOM. Its exit status is the only
+      # evidence that the remaining checks never ran, so its output is
+      # discarded rather than trusted. Exit 124/137 reach this branch too when
+      # the section had already printed something.
+      case "$_rc" in
+        124 | 137)
+          arr=$(section_failure "$_name" "timed out" \
+            "$_name.sh was killed at its ${_budget}s deadline after partial output" \
+            "Its remaining checks did not run, so they are not reported. $_run_hint")
+          ;;
+        *)
+          arr=$(section_failure "$_name" "incomplete" \
+            "$_name.sh exited $_rc after emitting output, so its remaining checks did not run" \
+            "$_run_hint")
+          ;;
+      esac
+    elif ! json_fragment_ok "$arr"; then
+      # Truncated mid-write, a nested document, or malformed output. Splicing
+      # it would make the ENTIRE merged document unparseable and cost every
+      # other section its findings, so it is replaced.
+      arr=$(section_failure "$_name" "corrupt" \
+        "$_name.sh produced output that is not a valid list of checks" \
+        "It was discarded so the rest of this scan survives. $_run_hint")
     fi
   fi
 
@@ -95,6 +160,16 @@ fi
 if [ "$CHECKS_ONLY" = "1" ]; then
   printf '%s\n' "$CHECKS_ARRAY"
   exit 0
+fi
+
+# Last line of defence. Every section fragment was validated on its own above,
+# but this catches anything that went wrong in the merge itself -- and the
+# snapshot below must never cache a document the QML layer cannot parse, or the
+# next scan would read back a poisoned baseline.
+if ! json_fragment_ok "$CHECKS"; then
+  printf '{"id":"doctor.merged","category":"system","title":"Scan","status":"problem","severity":3,"value":"corrupt","detail":"the merged check list is malformed and was discarded","suggestion":"Run sh %s/doctor.sh full to see the raw output."}\n' \
+    "$DIR"
+  exit 1
 fi
 
 TS=$(/usr/bin/date +%s 2>/dev/null || printf '0')

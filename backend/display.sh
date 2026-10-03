@@ -47,12 +47,22 @@ if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
   exit 0
 fi
 
-_d_monitors=$(/usr/bin/hyprctl monitors all 2>/dev/null)
-if hypr_hyprland_error "$_d_monitors"; then
+_d_raw=$(/usr/bin/hyprctl monitors all 2>/dev/null)
+_d_rc=$?
+# Strip ASCII control bytes at the boundary, for the same reason as hypr_query
+# in hyprland.sh. Bytes >= 0x80 are preserved, so a monitor's EDID
+# description/make/model text keeps its accents.
+_d_monitors=$(hypr_clean_multiline "$_d_raw")
+# A STALE HYPRLAND_INSTANCE_SIGNATURE makes hyprctl print "Couldn't connect to
+# .../.socket.sock. (4)" on stdout and exit 4. Both guards are used: the exit
+# status is authoritative, the banner text covers builds that exit 0. Without
+# them the socket error is parsed as an empty monitor list and this section
+# reports "your display is off, here is how to fix it" on a healthy machine.
+if [ "$_d_rc" -ne 0 ] || hypr_hyprland_error "$_d_monitors"; then
   emitd "display.outputs" display info 0 "Outputs" "unknown" \
     "hyprctl did not answer the monitor query" \
     "Try: hyprctl monitors all" \
-    "hyprctl returned an error banner"
+    "hyprctl returned an error banner or exited non-zero"
   emit_json display "$MODE"
   exit 0
 fi
@@ -78,6 +88,11 @@ if [ -z "$_d_active" ]; then
 fi
 
 if [ "$_d_active" -eq 0 ]; then
+  # hypr_monitor_count deliberately returns nothing rather than 0 (it cannot
+  # distinguish "none" from "did not answer"), but by this point hyprctl has
+  # demonstrably answered and parsed, so an empty total means zero outputs.
+  # Without this the message renders as "Hyprland reports  output(s)".
+  [ -n "$_d_total" ] || _d_total=0
   # A real and serious answer: the compositor is running with nothing attached
   # or nothing enabled. This is the "my display went dark" case.
   emitr "display.outputs" display problem 3 "Outputs" "none active" \
@@ -137,7 +152,12 @@ fi
 
 _d_mismatch=""
 _d_checked=0
-for _d_m in $(hypr_monitor_names "$_d_monitors"); do
+# Iterate the ENABLED outputs only. A disabled output has no mode line at all,
+# so hypr_mode_is_supported returns false for it and every unplugged display
+# would raise a bogus "unsupported mode" caution with an empty mode -- directly
+# contradicting the display.disabled_outputs finding that says the same
+# unplugged display is harmless.
+for _d_m in $(hypr_active_monitor_names "$_d_monitors"); do
   _d_checked=$((_d_checked + 1))
   if ! hypr_mode_is_supported "$_d_monitors" "$_d_m"; then
     _d_mode=$(hypr_monitor_mode "$_d_monitors" "$_d_m")

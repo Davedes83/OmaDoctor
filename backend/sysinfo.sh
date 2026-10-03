@@ -5,6 +5,11 @@
 #
 # Read-only. Reads /etc/os-release, /proc, and asks systemd for failed units.
 # Nothing is modified and no privileged command is used.
+# bootstrap.sh is sourced FIRST so that running this section directly -- which
+# is exactly what its own failure messages tell the user to do -- gets the
+# same pinned PATH, umask and locale as a dispatcher-driven run. Without it,
+# a shadow executable anywhere on the caller's PATH is resolved here.
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/bootstrap.sh"
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/common.sh"
 
 # Capture the requested output mode before any `set --` in this script
@@ -102,6 +107,12 @@ if have free; then
       emit "system.memory" system ok 0 "Memory" "${mpct}% used" \
         "$(printf '%s %s' "$used" "$total" | /usr/bin/awk '{printf "%.1f GiB of %.1f GiB", $1/1073741824, $2/1073741824}')" ""
     fi
+  else
+    # free(1) answered but carried no Mem: line. Emitting nothing here would
+    # make the check VANISH, and a check that is absent is indistinguishable
+    # from a check that passed.
+    emit "system.memory" system info 0 "Memory" "unknown" \
+      "free(1) reported no memory totals" ""
   fi
 else
   emit "system.memory" system info 0 "Memory" "unknown" "free(1) unavailable" ""
@@ -128,6 +139,11 @@ if have free; then
       "no swap device" \
       "Without swap, memory exhaustion triggers an OOM kill instead of slowing down."
   fi
+else
+  # Same reasoning as system.memory above: one of the two free(1) guards
+  # reporting "unknown" while the other disappeared would be inconsistent, and
+  # a missing check reads as a passing one.
+  emit "system.swap" system info 0 "Swap" "unknown" "free(1) unavailable" ""
 fi
 
 # ------------------------------------------------------- failed systemd units
@@ -150,19 +166,33 @@ else
 fi
 
 # ---------------------------------------------- pending package updates (read-only)
-if have checkupdates; then
-  cu=$(/usr/bin/timeout -k 2 10 checkupdates 2>/dev/null | /usr/bin/grep -c . || true)
-  case "$cu" in '' | *[!0-9]*) cu=0 ;; esac
-  if [ "$cu" -gt 0 ]; then
-    emit "system.updates" system info 0 "Pending updates" "$cu packages" \
-      "checkupdates reports $cu available" \
-      "Review with: omarchy update"
+#
+# checkupdates SYNCS THE PACMAN DATABASE over the network before comparing, so
+# it is neither local nor cheap: ~10s worst case on the dominant cost of a
+# quick scan, and a repeated pacman-db sync every poll is exactly the pattern
+# that makes `pacman -Sy` warn about partial upgrades. The quick scan is
+# documented as local-only and runs on a timer, so this probe is reserved for
+# full scans (doctor.sh exports OMADOCTOR_MODE). Everywhere else the check
+# reports "not checked" rather than inventing a number.
+if [ "${OMADOCTOR_MODE:-quick}" = "full" ]; then
+  if have checkupdates; then
+    cu=$(/usr/bin/timeout -k 2 10 checkupdates 2>/dev/null | /usr/bin/grep -c . || true)
+    case "$cu" in '' | *[!0-9]*) cu=0 ;; esac
+    if [ "$cu" -gt 0 ]; then
+      emit "system.updates" system info 0 "Pending updates" "$cu packages" \
+        "checkupdates reports $cu available" \
+        "Review with: omarchy update"
+    else
+      emit "system.updates" system ok 0 "Pending updates" "none" "system is up to date" ""
+    fi
   else
-    emit "system.updates" system ok 0 "Pending updates" "none" "system is up to date" ""
+    emit "system.updates" system info 0 "Pending updates" "unknown" \
+      "checkupdates not installed" ""
   fi
 else
-  emit "system.updates" system info 0 "Pending updates" "unknown" \
-    "checkupdates not installed" ""
+  emit "system.updates" system info 0 "Pending updates" "not checked" \
+    "checking requires a network sync, so it runs on a full diagnosis only" \
+    "Open the panel, or run: sh backend/doctor.sh full"
 fi
 
 emit_json system "$MODE"
