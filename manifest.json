@@ -14,6 +14,29 @@
     "description": "System health and diagnostics",
     "category": "System",
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "defaults": {
+      "pollSeconds": 0,
+      "notifyOnProblem": true
+    },
+    "schema": [
+      {
+        "key": "pollSeconds",
+        "type": "integer",
+        "label": "Background scan interval (seconds, 0 disables)",
+        "min": 0,
+        "max": 3600,
+        "step": 30,
+        "defaultValue": 0,
+        "description": "A quick scan spawns several short-lived processes. 0 (the default) scans only when the panel is opened."
+      },
+      {
+        "key": "notifyOnProblem",
+        "type": "boolean",
+        "label": "Notify when a check gets worse",
+        "defaultValue": true,
+        "description": "Fires at most once per worsening transition, never on the first scan, and never after a scan you ran yourself."
+      }
+    ]
   }
 }

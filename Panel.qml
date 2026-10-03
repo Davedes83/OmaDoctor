@@ -1,5 +1,7 @@
 import QtQuick
-import QtQuick.Controls
+// QtQuick.Controls is deliberately NOT imported: qs.Ui also exports Button
+// and TextField, and the ambiguity fails the whole file. qs.Ui.Button
+// resolves to the shell's own type, which is what this file wants.
 import Quickshell
 import Quickshell.Io
 import qs.Ui
@@ -64,9 +66,49 @@ Panel {
   // light up a row that no longer exists.
   property string hoveredCheckId: ""
 
-  // A background quick scan is local-only and cheap, so the bar stays current
-  // without the panel ever being opened.
-  readonly property int pollMs: 30000
+  // ------------------------------------------------- settings (shell.json)
+  //
+  // A bar widget's settings are the keys of its OWN entry in
+  // bar.layout.<section>, beside the id -- never nested under a `settings:`
+  // sub-object, which arrives as settings.settings.size and silently does
+  // nothing at every value. `settings` is injected by the bar
+  // (Bar.qml ModuleSlot.injectProps probes for the property name).
+  //
+  // barWidget.defaults in the manifest is NEVER read by the shell -- it is
+  // forwarded into registry metadata and only metadata.firstParty is consumed
+  // -- so these defaults are duplicated here deliberately. Change both.
+  readonly property int pollMs: {
+    var m = root.setting("pollSeconds", 0)
+    return m > 0 ? m * 1000 : 0            // 0 disables the background poll
+  }
+  readonly property bool notifyEnabled: root.setting("notifyOnProblem", true) !== false
+
+
+  // setSetting(key, value) -> persist one setting.
+  //
+  // bar.shell.updateEntryInline REWRITES the entry as { id, ...settings } and
+  // DROPS every key it was not given, so the existing entry is round-tripped
+  // from root.settings first. Sending only the key being changed would silently
+  // delete every other setting on the widget.
+  function setSetting(key, value) {
+    var entry = { id: root.moduleName }
+    var base = root.settings && typeof root.settings === "object" ? root.settings : {}
+    for (var k in base) {
+      if (k !== "id") entry[k] = base[k]
+    }
+    entry[key] = value
+    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function") {
+      root.bar.shell.updateEntryInline(root.moduleName, entry)
+    }
+  }
+
+  function toggleNotifications() {
+    root.setSetting("notifyOnProblem", !root.notifyEnabled)
+  }
+
+  function togglePolling() {
+    root.setSetting("pollSeconds", root.pollMs > 0 ? 0 : 300)
+  }
 
   readonly property color foreground: bar ? bar.barForeground : Color.foreground
   readonly property color accent: Color.accent
@@ -238,27 +280,52 @@ Panel {
     }
   }
 
-  function onScanFinished(raw) {
+  function onScanFinished(raw, exitCode, stderrText) {
     scanning = false
     lastMode = pendingMode
     var parsed = Model.parseDoctor(root.capText(raw))
+
+    // stderr is captured rather than discarded. It used to be dropped at three
+    // independent layers (no StdioCollector here, `2>/dev/null` in run-capped.sh,
+    // `2>/dev/null` in doctor.sh), so the user-facing message could only ever be
+    // the single fixed string "could not read scan output" -- useless to someone
+    // filing a bug report, because it does not distinguish a timeout, bad JSON,
+    // empty stdout or a crashed backend. The shell only ever console.warn()s, so
+    // journalctl was the sole place any of it was visible.
+    var err = root.firstLine(stderrText)
+
     if (!parsed) {
       // A malformed payload must not replace a good scan: keep the last known
       // state on screen and surface the failure rather than blanking the panel.
-      lastError = "could not read scan output"
+      lastError = err
+        ? "could not read scan output: " + err
+        : (exitCode !== 0 && exitCode !== undefined && exitCode !== null
+            ? "scan failed (exit " + exitCode + ")"
+            : "could not read scan output")
     } else {
       scan = parsed
-      lastError = ""
+      lastError = err ? "scan completed with warnings: " + err : ""
       // Diff BEFORE advancing the baseline: the comparison is against what was
       // true before this scan, not against itself.
       root.lastDiff = root.baselineScan ? Model.diffScans(root.baselineScan, parsed) : null
       root.baselineScan = parsed
       root.maybeNotify(parsed)
     }
+
+    // Deliberately AFTER the notification, and NOT inside maybeNotify(). A throw
+    // in the notify path used to skip this block entirely, leaving queuedFull
+    // stuck true so the next panel open ran an unrequested second full scan.
     if (root.queuedFull) {
       root.queuedFull = false
       root.refresh("full", false)
     }
+  }
+
+  function firstLine(text) {
+    if (typeof text !== "string") return ""
+    var t = text.replace(/[\r\n]+/g, " ").replace(/[ \t]+/g, " ").trim()
+    if (t.length > 200) t = t.slice(0, 200) + "..."
+    return t
   }
 
   // ------------------------------------------------------------ notification
@@ -282,32 +349,125 @@ Panel {
     if (body) root.notify("OmaDoctor", body)
   }
 
+  // notify() is implemented HERE because the type this widget extends,
+  // qs.Ui.Panel, has no such function: it defines exactly open, close,
+  // closeForPopoutSwitch, toggle, switchPanel and setting. The previous
+  // root.notify(...) therefore threw "Property 'notify' of object
+  // Panel_QMLTYPE_... is not a function" on every call -- six occurrences in
+  // journalctl -- so no notification was ever posted, while Model.shouldNotify
+  // sat fully unit-tested against a dead path.
+  //
+  // omarchy-notification-send, not notify-send: Omarchy's own wrapper calls
+  // org.freedesktop.Notifications.Notify directly, because notify-send's argv
+  // parsing is the surface that reinterprets a relayed headline like "--hint=.."
+  // as options. Its -g maps to the omarchy-glyph hint, which the notification
+  // card renders as a Nerd Font glyph in the icon slot -- the native way to put
+  // an icon in a notification. -a matters too: without it the daemon classifies
+  // the toast as ephemeral noise and never writes it to history.
+  //
+  // A bar widget is not injected with omarchyPath (only services and panels
+  // are), so the path comes from OMARCHY_PATH, which Omarchy exports into the
+  // session. The literal is the same path omarchy-notification-send itself
+  // lives at, used only if the variable is somehow absent.
+  readonly property string omarchyRoot: (Quickshell.env("OMARCHY_PATH") || "/usr/share/omarchy")
+
+  function notify(headline, body, glyph, urgency) {
+    if (root.notifyEnabled === false) return
+    if (notifyProc.running) return
+    notifyProc.command = [
+      root.omarchyRoot + "/bin/omarchy-notification-send",
+      "--app-name", "OmaDoctor",
+      "-g", String(glyph || Model.glyph(root.state)),
+      "-u", String(urgency || (root.state === "problem" ? "critical" : "normal")),
+      String(headline),
+      String(body || "")
+    ]
+    notifyProc.running = true
+  }
+
+  Process {
+    id: notifyProc
+    clearEnvironment: true
+    environment: root.trustedEnv()
+    stdout: SplitParser {}
+    stderr: SplitParser {}
+  }
+
   // --------------------------------------------------------------- report
   function reportText() {
-    if (!root.lastRawJson) return ""
+    // Gated on `ready`, not on lastRawJson. lastRawJson is assigned by the
+    // stdout collector BEFORE the parse is attempted, so after a parse failure
+    // it still held the unparseable payload, buildReportText returned its
+    // "No scan data available." fallback, and that non-empty string was copied
+    // to the clipboard and announced as "Diagnostic report copied (redacted)"
+    // while the panel showed an error.
+    if (!root.ready) return ""
     return Model.buildReportText(root.lastRawJson, {
       now: root.clockSec,
-      redactInfo: {
-        hostname: Quickshell.env("HOSTNAME") || "",
-        username: Quickshell.env("USER") || "",
-        home: Quickshell.env("HOME") || ""
-      },
+      redactInfo: root.redactInfo,
       redact: true,
       pluginVersion: root.pluginVersion
     })
   }
 
+  // Redaction inputs, read fresh each time.
+  //
+  // HOSTNAME is not exported into the process environment on many systems --
+  // it is a bash/shell variable, not an environment variable -- so
+  // Quickshell.env("HOSTNAME") returned "" and the hostname was never masked
+  // while the report footer still claimed redaction. Reading
+  // /proc/sys/kernel/hostname is authoritative and needs no environment
+  // variable. USER and HOME are genuinely exported, but a shell fallback keeps
+  // the redaction honest if that ever changes.
+  // The hostname, read from the kernel rather than from $HOSTNAME.
+  //
+  // HOSTNAME is a shell variable, not an environment variable, so on many
+  // systems it is simply absent from the process environment -- verified on this
+  // machine, where the omarchy-shell process has no HOSTNAME at all. Reading
+  // Quickshell.env("HOSTNAME") therefore returned "", Model.js's
+  // `if (o.hostname)` guard was always false, and the real hostname was pasted
+  // verbatim into every report the README tells users to publish -- while the
+  // footer still claimed redaction.
+  //
+  // One tiny read-only process at startup, through the same hardened spawner.
+  // FileIO is deliberately not used: it is not present anywhere in this shell's
+  // QML and relying on a type nothing else imports would be a gamble.
+  property string hostname: ""
+  Process {
+    id: hostnameProc
+    clearEnvironment: true
+    environment: root.trustedEnv()
+    command: ["/usr/bin/cat", "/proc/sys/kernel/hostname"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var h = String(text || "").replace(/[\r\n]+/g, "").trim()
+        if (h) root.hostname = h
+      }
+    }
+  }
+
+  function readHostname() {
+    return root.hostname
+  }
+
+  readonly property var redactInfo: ({
+    hostname: root.hostname,
+    username: Quickshell.env("USER") || "",
+    home: Quickshell.env("HOME") || ""
+  })
+
   function copyReport() {
+    if (copyProc.running) return
     var text = root.reportText()
     if (!text) {
-      root.notify("OmaDoctor", "No scan yet -- run a diagnosis first.")
+      root.notify("OmaDoctor", "No scan yet -- run a diagnosis first.", Model.glyph("info"), "normal")
       return
     }
     // Fed over stdin rather than argv: the report is large and carries user
     // data, and argv is world-readable in /proc.
     copyProc.pending = text
     copyProc.running = true
-    root.notify("OmaDoctor", "Diagnostic report copied (redacted).")
   }
 
   // ----------------------------------------------------------- IPC surface
@@ -345,8 +505,17 @@ Panel {
   // cap wrapper, and an explicit minimal environment. Nothing inherited from
   // the shell's environment can influence the scanner or let a shadow
   // executable be resolved. Copied from davedes.omcontrol.
-  readonly property string runnerPath: Qt.resolvedUrl("backend/run-capped.sh").toString().replace("file://", "")
-  readonly property string doctorPath: Qt.resolvedUrl("backend/doctor.sh").toString().replace("file://", "")
+  // Qt.resolvedUrl(...).toString() PERCENT-ENCODES: a space in the path becomes
+  // %20 and a literal % becomes %25. Handing that to Process.command yields empty
+  // stdout, so the only symptom would be "could not read scan output" with no
+  // other clue. Stripping the 7-character scheme and leaving the rest intact is
+  // the form the shell's own plugins use.
+  function localPath(relative) {
+    var u = Qt.resolvedUrl(relative).toString()
+    return u.indexOf("file://") === 0 ? u.slice(7) : u
+  }
+  readonly property string runnerPath: root.localPath("backend/run-capped.sh")
+  readonly property string doctorPath: root.localPath("backend/doctor.sh")
   readonly property int maxOutputBytes: 1048576
   // Two more variables, added deliberately and NOT by inheriting the shell's
   // environment wholesale.
@@ -362,13 +531,24 @@ Panel {
   // locate that socket. Neither variable grants a capability beyond talking to
   // the user's own compositor, so the hardened spawner stays hardened: PATH is
   // still a fixed root-owned allowlist and nothing else is inherited.
-  readonly property var trustedEnv: ({
-    "PATH": "/usr/bin:/bin",
-    "HOME": Quickshell.env("HOME"),
-    "LC_ALL": "C",
-    "HYPRLAND_INSTANCE_SIGNATURE": Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE") || "",
-    "XDG_RUNTIME_DIR": Quickshell.env("XDG_RUNTIME_DIR") || ""
-  })
+  //
+  // Quickshell.env() is a ONE-TIME read, not a reactive binding. Latching the
+  // instance signature into a readonly property froze the socket path at widget
+  // construction, so after a compositor restart the signature was stale but
+  // NON-EMPTY -- and hyprctl's "signature not set" path never triggered.
+  // hyprctl instead printed "Couldn't connect to .../.socket.sock. (4)" and
+  // exited 4, which the backend now detects, so the worst case is an honest
+  // "unknown" rather than a fabricated "your display is off". It is a FUNCTION
+  // now, so each scan asks the environment again.
+  function trustedEnv() {
+    return {
+      "PATH": "/usr/bin:/bin",
+      "HOME": Quickshell.env("HOME"),
+      "LC_ALL": "C",
+      "HYPRLAND_INSTANCE_SIGNATURE": Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE") || "",
+      "XDG_RUNTIME_DIR": Quickshell.env("XDG_RUNTIME_DIR") || ""
+    }
+  }
 
   function capText(text) {
     return typeof text === "string" && text.length > root.maxOutputBytes
@@ -378,12 +558,36 @@ Panel {
   Process {
     id: scanProc
     clearEnvironment: true
-    environment: root.trustedEnv
+    environment: root.trustedEnv()
+    // stderr is collected, not discarded. run-capped.sh and doctor.sh both
+    // redirect it to /dev/null internally, so this catches anything a section
+    // writes before those redirections, plus the timeout's own diagnostics --
+    // which is the difference between "could not read scan output" and a message
+    // a user can act on.
+    property string stderrText: ""
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         root.lastRawJson = root.capText(text)
-        root.onScanFinished(text)
+        root.onScanFinished(text, undefined, scanProc.stderrText)
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: scanProc.stderrText = root.capText(text)
+    }
+    // scanning was cleared ONLY from onStreamFinished. If the collector never
+    // fires -- the Process cannot spawn at all, the command array is malformed,
+    // the timeout binary is missing -- nothing ever cleared the flag and the
+    // panel sat on "scanning..." indefinitely. The asymmetry was visible in the
+    // file: copyProc had an onExited and scanProc did not.
+    onExited: function(exitCode) {
+      root.scanning = false
+      // onStreamFinished normally gets here first; if the process died without
+      // producing stdout, finish the scan so queuedFull is honoured and the UI
+      // reports the failure instead of waiting.
+      if (root.lastRawJson === "") {
+        root.onScanFinished("", exitCode, scanProc.stderrText)
       }
     }
   }
@@ -393,26 +597,48 @@ Panel {
   Process {
     id: copyProc
     clearEnvironment: true
-    environment: root.trustedEnv
+    environment: root.trustedEnv()
     stdinEnabled: true
     command: ["/usr/bin/wl-copy"]
     property string pending: ""
+    property bool succeeded: false
     onStarted: {
       if (copyProc.pending !== "") {
         copyProc.write(copyProc.pending)
       }
+      // wl-copy reads stdin until EOF, so the write end must be closed on the
+      // same tick or the process never exits and the clipboard never updates.
       copyProc.stdinEnabled = false
     }
-    onExited: function(exitCode, exitStatus) {
+    onExited: function(exitCode) {
       if (copyProc.stdinEnabled === false) copyProc.stdinEnabled = true
+      copyProc.succeeded = (exitCode === 0)
+      var ok = copyProc.succeeded
       copyProc.pending = ""
+      // Confirm AFTER the exit status, not before. The old code announced
+      // success at the moment it queued the copy, so it claimed success even
+      // when a second click silently dropped the payload (setting running=true
+      // on a live Process is a no-op, so onStarted never re-fired and onExited
+      // then discarded the text), and even when wl-copy itself failed.
+      if (root.notifyEnabled) {
+        root.notify("OmaDoctor",
+          ok ? "Diagnostic report copied (redacted)."
+             : "Could not copy the report -- wl-copy exited " + exitCode + ".",
+          Model.glyph(ok ? "ok" : "problem"),
+          ok ? "normal" : "critical")
+      }
     }
   }
 
+  // The background poll. Disabled entirely when pollSeconds is 0, which is the
+  // default: a quick scan is a multi-process ~2s run, and doing that every 30
+  // seconds forever on every monitor, purely to keep a bar glyph fresh, is the
+  // plugin's largest steady-state cost. The panel still runs a full scan when
+  // opened, so nothing is lost except background freshness.
   Timer {
     id: pollTimer
-    interval: root.pollMs
-    running: true
+    interval: root.pollMs > 0 ? root.pollMs : 60000
+    running: root.pollMs > 0
     repeat: true
     triggeredOnStart: true
     onTriggered: if (!root.opened) root.refresh("quick")
@@ -432,6 +658,7 @@ Panel {
   // normal state rather than an error.
   Component.onCompleted: {
     root.loadBaselineFromHistory()
+    hostnameProc.running = true
     refresh("quick")
   }
 
@@ -484,7 +711,14 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.ready ? root.stateGlyph : ""
+    // NEVER empty. BarIconButton reports hasVisualContent === false for empty
+    // text, which makes WidgetButton.visible false, which makes the bar slot
+    // report implicitWidth 0 -- so the widget occupied no space at all until the
+    // first scan landed (~2s after every shell start and after every plugin
+    // reload), and the "checking..." tooltip below could never be seen, because
+    // WidgetButton hides the tooltip of an invisible button. A neutral glyph
+    // keeps the slot correctly sized from the first frame.
+    text: root.ready ? root.stateGlyph : Model.glyph("info")
     tooltipText: root.ready
       ? "OmaDoctor - " + Model.stateLabel(root.state).toLowerCase() +
         (root.issueCount > 0 ? " - " + root.issueCount + " to review" : "")
