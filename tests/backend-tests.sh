@@ -16,7 +16,7 @@ run() {
   # run SCRIPT ARG...  -> stdout only, stdin closed, hard deadline
   #
   # 150s, not 90: doctor.sh runs its sections SEQUENTIALLY behind per-section
-  # deadlines that now sum to ~87s worst case for a full scan. A harness
+  # deadlines that now sum to ~97s worst case for a full scan. A harness
   # deadline near the product's own budget will kill a slow-but-legitimate run
   # mid-document and report it as a malformed payload, which looks exactly like
   # a real failure and is not one.
@@ -28,6 +28,7 @@ AUDIO=$(run "$BACKEND_DIR/audio.sh")
 STORAGE=$(run "$BACKEND_DIR/storage.sh")
 SERVICES=$(run "$BACKEND_DIR/services.sh")
 HYPRLAND=$(run "$BACKEND_DIR/hyprland.sh")
+DISPLAY=$(run "$BACKEND_DIR/display.sh")
 SYSINFO_BARE=$(run "$BACKEND_DIR/sysinfo.sh" --checks-only)
 QUICK=$(run "$BACKEND_DIR/doctor.sh" quick)
 FULL=$(run "$BACKEND_DIR/doctor.sh" full)
@@ -35,7 +36,7 @@ FULL=$(run "$BACKEND_DIR/doctor.sh" full)
 # ------------------------------------------------------------ JSON validity
 
 for pair in "sysinfo:$SYSINFO" "audio:$AUDIO" "storage:$STORAGE" \
-            "services:$SERVICES" "hyprland:$HYPRLAND"; do
+            "services:$SERVICES" "hyprland:$HYPRLAND" "display:$DISPLAY"; do
   name=${pair%%:*}
   doc=${pair#*:}
   if printf '%s' "$doc" | jq -e . >/dev/null 2>&1; then
@@ -49,7 +50,7 @@ done
 REQUIRED='.checks | length > 0 and all(.[]; has("id") and has("category") and has("title") and has("status") and has("severity") and has("value") and has("detail") and has("suggestion"))'
 missing=""
 for pair in "sysinfo:$SYSINFO" "audio:$AUDIO" "storage:$STORAGE" \
-            "services:$SERVICES" "hyprland:$HYPRLAND"; do
+            "services:$SERVICES" "hyprland:$HYPRLAND" "display:$DISPLAY"; do
   name=${pair%%:*}
   doc=${pair#*:}
   if ! printf '%s' "$doc" | jq -e "$REQUIRED" >/dev/null 2>&1; then
@@ -77,7 +78,7 @@ OPTIONAL='all(.checks[];
 )'
 bad_optional=""
 for pair in "sysinfo:$SYSINFO" "audio:$AUDIO" "storage:$STORAGE" \
-            "services:$SERVICES" "hyprland:$HYPRLAND"; do
+            "services:$SERVICES" "hyprland:$HYPRLAND" "display:$DISPLAY"; do
   name=${pair%%:*}
   doc=${pair#*:}
   if ! printf '%s' "$doc" | jq -e "$OPTIONAL" >/dev/null 2>&1; then
@@ -93,12 +94,12 @@ check_eq "severity is a JSON number" "number" \
   "$(printf '%s' "$SYSINFO" | jq -r '.checks[0].severity | type')"
 
 # status must always be one of the four known states.
-bad=$(printf '%s' "$SYSINFO" "$AUDIO" "$STORAGE" "$SERVICES" "$HYPRLAND" \
+bad=$(printf '%s' "$SYSINFO" "$AUDIO" "$STORAGE" "$SERVICES" "$HYPRLAND" "$DISPLAY" \
   | jq -s -r '[.[] | .checks[].status | select(. != "ok" and . != "info" and . != "attention" and . != "problem")] | length')
 check_eq "status values are within the known set" "0" "$bad"
 
 # ids must be unique, otherwise the UI cannot address a check by id.
-dupes=$(printf '%s' "$SYSINFO" "$AUDIO" "$STORAGE" "$SERVICES" "$HYPRLAND" \
+dupes=$(printf '%s' "$SYSINFO" "$AUDIO" "$STORAGE" "$SERVICES" "$HYPRLAND" "$DISPLAY" \
   | jq -s -r '[.[] | .checks[].id] | (length - (unique | length))')
 check_eq "check ids are unique across sections" "0" "$dupes"
 
@@ -149,7 +150,7 @@ esac
 # these ever drops out of quick, it silently stops being checked until a user
 # happens to open the panel -- which is precisely when they least expect to
 # wait.
-for want in services hyprland; do
+for want in services hyprland display; do
   case "$(printf '%s' "$QUICK" | jq -r '.sections')" in
     *"$want"*) ok "quick scan includes $want" ;;
     *)         fail "quick scan includes $want" "sections=$(printf '%s' "$QUICK" | jq -r '.sections')" ;;
@@ -188,6 +189,7 @@ printf '#!/bin/sh\nexit 3\n' > "$BROKEN/sysinfo.sh"
 : > "$BROKEN/storage.sh"
 : > "$BROKEN/services.sh"
 : > "$BROKEN/hyprland.sh"
+: > "$BROKEN/display.sh"
 broken=$(/usr/bin/timeout -k 2 60 /bin/sh "$BROKEN/doctor.sh" quick 2>/dev/null </dev/null)
 rm -rf "$BROKEN"
 if printf '%s' "$broken" \
@@ -205,6 +207,7 @@ printf '#!/bin/sh\nprintf ""\n' > "$SILENT/sysinfo.sh"
 : > "$SILENT/storage.sh"
 : > "$SILENT/services.sh"
 : > "$SILENT/hyprland.sh"
+: > "$SILENT/display.sh"
 silent=$(/usr/bin/timeout -k 2 60 /bin/sh "$SILENT/doctor.sh" quick 2>/dev/null </dev/null)
 rm -rf "$SILENT"
 if printf '%s' "$silent" \
@@ -238,7 +241,7 @@ check_eq "no check reports text scraped from a usage banner" "0" "$fabricated"
 # "Unknown command verb". If any of that ever reached a check value or detail,
 # a working machine would be reported as broken (or worse, a broken one as
 # healthy). None of these strings may appear anywhere in a section's output.
-leaked_banner=$(printf '%s' "$SERVICES" "$HYPRLAND" \
+leaked_banner=$(printf '%s' "$SERVICES" "$HYPRLAND" "$DISPLAY" \
   | jq -s -r '[.[] | .checks[] | select(
       ((.value // "") + " " + (.detail // "") + " " + (.suggestion // ""))
       | test("(?i)unknown request|unknown command verb|hyprland_instance_signature|is hyprland running")
@@ -263,6 +266,62 @@ bad_svc=$(printf '%s' "$SERVICES" | jq -r '[.checks[]
        + "activating|deactivating|reloading|not installed|masked|unit error|unknown)$")) | not)
   ] | length')
 check_eq "every service value is a known state or explicit unknown" "0" "$bad_svc"
+
+# ------------------------------------------------------- display vocabulary
+#
+# The Display Doctor's whole value depends on NOT inventing a display problem.
+# Two specific false alarms are guarded here:
+#
+#   * an unsupported-mode verdict on every monitor, because the current mode
+#     ("1920x1080@59.99800") and the available list ("1920x1080@60.00Hz") are in
+#     different formats and never compare equal literally;
+#   * a fractional scale or a rotation escalated to a fault, when both are
+#     deliberate user choices and legitimate.
+#
+# A user who sees a warning on every scan learns to ignore the panel, which
+# costs more than never shipping the check at all.
+#
+# The guards are asserted against SYNTHETIC documents as well as the live run.
+# Asserting only against live output means the rule is untested whenever this
+# machine happens not to have the condition -- which is exactly the case where
+# a regression would ship unnoticed. Each synthetic document below is a check
+# the section is capable of emitting, so the guard is proven to catch it.
+d_esc() { printf '%s' "$1" | jq -r '[.checks[]
+  | select((.id == "display.scale" or .id == "display.orientation"
+            or .id == "display.mirroring")
+           and (.status == "problem" or .status == "attention"))] | length'; }
+
+check_eq "the guard flags an escalated fractional scale" "1" \
+  "$(d_esc '{"checks":[{"id":"display.scale","status":"attention","value":"fractional"}]}')"
+check_eq "the guard flags an escalated rotation" "1" \
+  "$(d_esc '{"checks":[{"id":"display.orientation","status":"problem","value":"rotated"}]}')"
+check_eq "the guard flags an escalated mirror" "1" \
+  "$(d_esc '{"checks":[{"id":"display.mirroring","status":"attention","value":"in use"}]}')"
+check_eq "the guard passes a legitimate fractional scale at info" "0" \
+  "$(d_esc '{"checks":[{"id":"display.scale","status":"info","value":"fractional"}]}')"
+
+bad_display=$(printf '%s' "$DISPLAY" | jq -r '[.checks[]
+  | select((.id == "display.scale" or .id == "display.orientation"
+            or .id == "display.mirroring")
+           and (.status == "problem" or .status == "attention"))
+  ] | length')
+check_eq "a chosen scale, rotation or mirror is never escalated to a fault" "0" "$bad_display"
+
+# "unknown" must be the honest answer when there is no compositor, and must
+# never be dressed up as a display fault.
+bad_unknown=$(printf '%s' "$DISPLAY" | jq -r '[.checks[]
+  | select((.value == "unknown") and (.status == "problem" or .status == "attention"))
+  ] | length')
+check_eq "an unreachable compositor is never reported as a display fault" "0" "$bad_unknown"
+
+# Every display value must be drawn from the known vocabulary. A value outside
+# it means something unparsed leaked through.
+bad_display_vocab=$(printf '%s' "$DISPLAY" | jq -r '[.checks[]
+  | select((.value | test("^(unknown|unavailable|[0-9]+ active|none|none active|"
+       + "supported|unsupported mode set|in use|fractional|integer|normal|"
+       + "rotated or mirrored|[0-9]+)$")) | not)
+  ] | length')
+check_eq "every display value is a known state or explicit unknown" "0" "$bad_display_vocab"
 
 # The audio defaults must be either a real node name or an explicit unknown --
 # never a bare number that a user cannot act on.

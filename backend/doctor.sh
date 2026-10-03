@@ -17,7 +17,7 @@
 # a missing check must never be mistaken for a healthy one.
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/bootstrap.sh"
 
-VERSION="0.1.0"
+VERSION="0.3.0"
 
 MODE=quick
 CHECKS_ONLY=0
@@ -40,6 +40,7 @@ deadline_for() {
     storage) printf '15' ;;
     services) printf '10' ;;
     hyprland) printf '10' ;;
+    display) printf '10' ;;
     *)       printf '15' ;;
   esac
 }
@@ -79,6 +80,7 @@ add_section() {
 add_section sysinfo
 add_section services
 add_section hyprland
+add_section display
 add_section audio
 add_section storage
 [ "$MODE" = "full" ] && add_section network

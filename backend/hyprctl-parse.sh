@@ -239,3 +239,195 @@ hypr_workspace_count() {
   case "$_n" in '' | *[!0-9]* | 0) return 1 ;; esac
   printf '%s' "$_n"
 }
+
+# =====================================================================
+# Display diagnostics
+#
+# Everything above answers "what does Hyprland report". What follows answers
+# the questions the Display Doctor actually asks -- is this state internally
+# CONSISTENT? -- so the logic lives here rather than in display.sh, where it
+# could only ever be verified by looking at one real machine.
+#
+# A note on scope: Omarchy configures monitors in ~/.config/hypr/monitors.lua,
+# which is LUA, not the classic `monitor=` syntax. Parsing it would mean
+# guessing at a general Lua parser to reach a conclusion about the user's
+# hardware. So none of these functions read a config file. They compare
+# Hyprland's own reported state against itself, which is sufficient for the
+# failures users actually hit -- a display that reverts after wake, a mode
+# Hyprland cannot honour, a stale rule for hardware that is no longer attached.
+# Reading the config would be a REPAIR-shaped operation, and this plugin does
+# not repair.
+
+# hypr_active_monitor_names MONITORS_TEXT -> names of monitors that are enabled.
+#
+# Distinct from hypr_monitor_names, which counts every block `monitors all`
+# returns including disabled ones. "How many displays are actually working" and
+# "how many outputs does this hardware have" are different questions and must
+# not be answered by the same function.
+hypr_active_monitor_names() {
+  printf '%s\n' "$1" | /usr/bin/awk '
+    function reap() { if (name != "" && !disabled) print name }
+    /^Monitor [^ ]+ \(ID [0-9]+\):$/ {
+      reap()
+      name = $0
+      sub(/^Monitor /, "", name)
+      sub(/ \(ID [0-9]+\):$/, "", name)
+      disabled = 0
+      next
+    }
+    name != "" && $0 ~ /^[[:space:]]*disabled:[[:space:]]*true[[:space:]]*$/ { disabled = 1 }
+    END { reap() }
+  '
+}
+
+# hypr_active_monitor_count MONITORS_TEXT -> count of ENABLED monitors.
+#
+# Returns nothing (not 0) when hyprctl did not answer, so "no displays" is never
+# confused with "could not ask". 0 is a real and serious answer, so it is
+# returned as "0" deliberately.
+hypr_active_monitor_count() {
+  hypr_hyprland_error "$1" && return 1
+  _n=$(hypr_active_monitor_names "$1" | /usr/bin/wc -l | /usr/bin/tr -d ' ')
+  case "$_n" in '' | *[!0-9]*) return 1 ;; esac
+  printf '%s' "$_n"
+}
+
+# hypr_mode_is_supported MONITORS_TEXT MONITOR -> true when the monitor's
+# CURRENT mode appears in its own availableModes list.
+#
+# This is the mode/mode mismatch the design brief called out: Hyprland applying
+# a mode the output says it does not support is what causes a display to revert
+# after a reconnect or a resume.
+#
+# The two sides are normalised before comparison, because they are NOT in the
+# same format: the current mode is "1920x1080@59.99800" while the available list
+# carries "1920x1080@60.00Hz". Comparing them literally would report a mismatch
+# on every monitor, every time -- a false alarm worse than no check at all. So
+# both sides are reduced to "<width>x<height>" and the refresh rate is compared
+# with a tolerance.
+#
+# Refresh rates disagree by rounding: a panel advertising 59.94Hz reports its
+# current mode as 59.99800 and its available list as 59.94Hz. They are the same
+# rate. A tolerance of 1.0Hz covers that without hiding a genuine mismatch
+# between, say, 60Hz and 120Hz.
+hypr_mode_is_supported() {
+  _hm_current=$(hypr_monitor_mode "$1" "$2")
+  [ -n "$_hm_current" ] || return 1
+  _hm_avail=$(printf '%s\n' "$1" | /usr/bin/awk -v want="$2" '
+    /^Monitor [^ ]+ \(ID [0-9]+\):$/ {
+      name = $0
+      sub(/^Monitor /, "", name)
+      sub(/ \(ID [0-9]+\):$/, "", name)
+      inside = (name == want)
+      next
+    }
+    inside && $1 == "availableModes:" {
+      v = $0
+      sub(/^[^:]*:[[:space:]]*/, "", v)
+      print v
+      exit
+    }
+  ')
+  [ -n "$_hm_avail" ] || return 1
+
+  # Reduce the current mode to resolution + numeric refresh.
+  _hm_cres=$(printf '%s' "$_hm_current" | /usr/bin/sed -n 's/^\([0-9]*x[0-9]*\)@.*/\1/p')
+  _hm_cref=$(printf '%s' "$_hm_current" | /usr/bin/sed -n 's/^.*@//p')
+  [ -n "$_hm_cres" ] && [ -n "$_hm_cref" ] || return 1
+
+  for _hm_m in $_hm_avail; do
+    case "$_hm_m" in
+      *Hz) ;;
+      *) continue ;;
+    esac
+    _hm_ares=$(printf '%s' "$_hm_m" | /usr/bin/sed -n 's/^\([0-9]*x[0-9]*\)@.*/\1/p')
+    _hm_aref=$(printf '%s' "$_hm_m" | /usr/bin/sed -n 's/^.*@\([0-9.]*\)Hz.*/\1/p')
+    [ "$_hm_ares" = "$_hm_cres" ] || continue
+    [ -n "$_hm_aref" ] || continue
+    # awk for the comparison: shell arithmetic cannot do floating point.
+    if printf '%s %s %s\n' "$_hm_cref" "$_hm_aref" | \
+       /usr/bin/awk '{ d = $1 - $2; if (d < 0) d = -d; exit !(d <= 1.0) }'; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# hypr_mirrored_monitor MONITORS_TEXT -> the name of a monitor that mirrors
+# another, or nothing.
+#
+# mirrorOf is "none" for an independent output and the other output's name for
+# a mirror. Two outputs claiming to mirror the SAME third output, or an output
+# mirroring one that is disabled, is a classic multi-monitor layout conflict.
+hypr_mirrored_monitor() {
+  printf '%s\n' "$1" | /usr/bin/awk '
+    /^Monitor [^ ]+ \(ID [0-9]+\):$/ {
+      name = $0
+      sub(/^Monitor /, "", name)
+      sub(/ \(ID [0-9]+\):$/, "", name)
+      inside = 1
+      next
+    }
+    inside && $1 == "mirrorOf:" {
+      v = $0
+      sub(/^[^:]*:[[:space:]]*/, "", v)
+      sub(/[[:space:]]*$/, "", v)
+      # "none" is the independent case, not a mirror.
+      if (v != "" && v != "none") { print name "\t" v; exit }
+    }
+  '
+}
+
+# hypr_fractional_scale MONITORS_TEXT -> "MONITOR<SCALE>" for every monitor
+# whose scale is not a whole number, or nothing.
+#
+# A fractional scale is a legitimate choice and NOT a fault -- it is reported as
+# info. It is surfaced because it is the most common cause of "the UI looks
+# blurry" and the user cannot see the cause otherwise. Scale 1.5 is the whole
+# number-times-one-half case and is extremely common; anything with more decimal
+# places is worth a second look.
+hypr_fractional_scale() {
+  printf '%s\n' "$1" | /usr/bin/awk '
+    /^Monitor [^ ]+ \(ID [0-9]+\):$/ {
+      name = $0
+      sub(/^Monitor /, "", name)
+      sub(/ \(ID [0-9]+\):$/, "", name)
+      inside = 1
+      next
+    }
+    inside && $1 == "scale:" {
+      v = $0
+      sub(/^[^:]*:[[:space:]]*/, "", v)
+      sub(/[[:space:]]*$/, "", v)
+      # An integer scale (1, 2, 3) has no fractional part at all.
+      if (v ~ /^[0-9]+$/) next
+      if (v == "") next
+      print name "\t" v
+    }
+  '
+}
+
+# hypr_transformed_monitor MONITORS_TEXT -> "MONITOR<TRANSFORM>" for every
+# monitor with a non-zero transform, or nothing.
+#
+# transform 0 is normal. 1/3 are 90/270 degrees (portrait) and 2/4/5/6 are
+# mirrored variants. A mirrored transform is unusual enough to be worth naming,
+# because it is easy to leave behind after re-plugging a cable and it looks like
+# a driver bug.
+hypr_transformed_monitor() {
+  printf '%s\n' "$1" | /usr/bin/awk '
+    /^Monitor [^ ]+ \(ID [0-9]+\):$/ {
+      name = $0
+      sub(/^Monitor /, "", name)
+      sub(/ \(ID [0-9]+\):$/, "", name)
+      inside = 1
+      next
+    }
+    inside && $1 == "transform:" {
+      v = $0
+      sub(/^[^:]*:[[:space:]]*/, "", v)
+      sub(/[[:space:]]*$/, "", v)
+      if (v != "" && v != "0") print name "\t" v
+    }
+  '
+}

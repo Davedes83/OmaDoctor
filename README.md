@@ -15,12 +15,13 @@ machine right now, and what do I do about it?*
 | `system`    | OS, architecture, kernel, uptime, load, memory, swap, failed units, pending updates             |
 | `services`  | PipeWire, WirePlumber, desktop portals, NetworkManager, Bluetooth — each at its real scope       |
 | `hyprland`  | compositor version, monitor count, and every configuration error with its file and line          |
-| `audio`     | server state, default output/input, volume and mute, device count                              |
-| `storage`   | root and home filesystems, inode usage, root writability, largest directories                  |
+| `display`   | attached vs disabled outputs, mode support, mirroring, scale and rotation                            |
+| `audio`     | server state, default output/input, volume and mute, device count                                    |
+| `storage`   | root and home filesystems, inode usage, root writability, largest directories                        |
 | `network`   | interfaces, default route, IPv4/IPv6, DNS config and resolution, gateway, reachability, latency |
 
-`quick` runs the local sections only (system, services, hyprland, audio,
-storage). `full` adds the network section.
+`quick` runs the local sections only (system, services, hyprland, display,
+audio, storage). `full` adds the network section.
 
 Two details about `services` are worth knowing, because getting them wrong
 produces confident nonsense. `NetworkManager` and `bluetooth` are **system**
@@ -34,6 +35,23 @@ compositor's own wording — because that is the information users otherwise
 have to dig out of a terminal. When no Hyprland instance is reachable (a TTY,
 a test harness, a nested session) every check reports `unknown`, never a
 failure.
+
+`display` answers one question: is the current display configuration
+internally consistent? It is not a monitor manager — it never writes a rule
+and never reloads Hyprland. Notably it does **not** read `monitors.lua`,
+because that file is Lua rather than the classic `monitor=` syntax, and
+guessing at it would put a config-parsing failure on the path of a health
+verdict. It compares Hyprland's own reported state against itself, which
+covers the failures users actually hit: a display that reverts after a
+reconnect because its mode is not one the output lists, and a stale rule for
+hardware that is not currently attached (a *disabled* output, which is why
+this section queries `monitors all` rather than `monitors`).
+
+Two of its checks deliberately report **nothing wrong**. A fractional scale
+and a rotated or mirrored panel are choices, not faults; both are surfaced as
+informational because each is a frequent cause of "something looks wrong"
+that the user cannot otherwise explain. A check that cries wolf on every
+scan gets ignored, which costs more than not having the check.
 
 Every check reports one of four states, and the overall verdict is **worst-wins**
 rather than an average — one unreadable thing is more actionable than a blended

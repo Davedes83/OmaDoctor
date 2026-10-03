@@ -31,7 +31,7 @@ Panel {
   property bool scanning: false
   property string lastError: ""
   property string lastMode: "quick"
-  property string pluginVersion: "0.2.0"
+  property string pluginVersion: "0.3.0"
 
   readonly property var checks: scan && Array.isArray(scan.checks) ? scan.checks : []
   readonly property string state: Model.overallState(checks)
@@ -83,15 +83,16 @@ Panel {
   // gets truncated mid-document and arrives unparseable -- which the panel
   // would then report as "could not read scan output".
   //
-  //   quick: system 15 + services 10 + hyprland 10 + audio 12 + storage 15 = 62
-  //   full:  the above + network 25                                          = 87
+  //   quick: system 15 + services 10 + hyprland 10 + display 10
+  //         + audio 12 + storage 15                                        = 72
+  //   full:  the above + network 25                                        = 97
   //
   // Both figures are worst case. Measured real timings are far lower (a few
   // seconds), so these are headroom against a stalling probe, not an estimate
   // of a normal scan. Keep them in step with deadline_for() in doctor.sh --
   // adding a section without raising this is how a scan gets killed mid-write.
   function budgetFor(mode) {
-    return mode === "full" ? 100 : 75
+    return mode === "full" ? 110 : 85
   }
 
   function refresh(mode) {
