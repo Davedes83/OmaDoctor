@@ -35,7 +35,12 @@ function parseDoctor(text) {
       severity: num(c.severity),
       value: str(c.value),
       detail: str(c.detail),
-      suggestion: str(c.suggestion)
+      suggestion: str(c.suggestion),
+      // Both of these are OPTIONAL and purely additive: a check that does not
+      // carry them normalises to an empty list / null, so existing producers
+      // and renderers keep working untouched.
+      details: strArray(c.details),
+      repair: normRepair(c.repair)
     })
   }
 
@@ -62,6 +67,51 @@ function normStatus(s) {
   if (s === "ok" || s === "info" || s === "attention" || s === "problem") return s
   // An unrecognised status must never be silently treated as healthy.
   return "problem"
+}
+
+// strArray(v) -> a list of strings, never null.
+//
+// Accepts an array or a single scalar (coerced to one element) so a producer
+// may emit either. Non-string, non-scalar entries are dropped rather than
+// stringified -- "[object Object]" in a diagnostic report is worse than an
+// absent line.
+function strArray(v) {
+  if (v === undefined || v === null || v === "") return []
+  var raw = Array.isArray(v) ? v : [v]
+  var out = []
+  for (var i = 0; i < raw.length; i++) {
+    var e = raw[i]
+    if (e === undefined || e === null) continue
+    if (typeof e === "object" || typeof e === "function") continue
+    var s = str(e)
+    if (s !== "") out.push(s)
+  }
+  return out
+}
+
+// normRepair(v) -> null, or a repair descriptor { tier, label, detail }.
+//
+// DESCRIPTIVE ONLY. Nothing in this file (or the plugin) ever executes a
+// repair; OmaDoctor is read-only by design. The descriptor exists so a finding
+// can say what a fix WOULD be, and so a future repair phase has a defined
+// place to hang real affordances.
+//
+// "tier" is one of safe | caution | manual. An unrecognised or missing tier
+// degrades to "manual" -- the most dangerous tier -- for the same reason
+// normStatus never degrades to "ok": an unknown value must never be treated as
+// the reassuring one.
+function normRepair(v) {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null
+  var label = str(v.label)
+  var tier = str(v.tier).toLowerCase()
+  if (tier !== "safe" && tier !== "caution" && tier !== "manual") tier = "manual"
+  // A repair with no label says nothing useful, so it is not a repair.
+  if (label === "") return null
+  return {
+    tier: tier,
+    label: label,
+    detail: str(v.detail)
+  }
 }
 
 // ------------------------------------------------------------- health roll-up
@@ -355,13 +405,39 @@ function buildReport(scan, opts) {
   if (found.length === 0) {
     out.push("  Nothing needs attention.")
   } else {
+    // One repair anywhere earns a single global disclaimer rather than a
+    // repeated line under every finding.
+    var anyRepair = false
+    for (var r = 0; r < found.length; r++) {
+      if (found[r].repair) { anyRepair = true; break }
+    }
     for (var f = 0; f < found.length; f++) {
       var x = found[f]
       out.push("")
       out.push("  " + (f + 1) + ". [" + x.status.toUpperCase() + "] " + str(x.title) +
         (x.value ? " — " + str(x.value) : ""))
       if (x.detail) out.push("     Evidence : " + str(x.detail))
+      // Structured evidence: the multi-line "here is what I measured" block a
+      // detail string cannot carry (per-monitor state, config error lines).
+      if (x.details && x.details.length > 0) {
+        for (var d = 0; d < x.details.length; d++) {
+          out.push("       - " + str(x.details[d]))
+        }
+      }
       if (x.suggestion) out.push("     Suggested: " + str(x.suggestion))
+      // Descriptive only: what a fix WOULD be. Never executed.
+      if (x.repair) {
+        out.push("     Repair   : " + String(x.repair.tier).toUpperCase() +
+          " — " + str(x.repair.label))
+        if (x.repair.detail) {
+          out.push("       " + str(x.repair.detail))
+        }
+      }
+    }
+    if (anyRepair) {
+      out.push("")
+      out.push("  Repairs are listed for information only. OmaDoctor does not")
+      out.push("  run them, and never modifies your configuration.")
     }
   }
   out.push("")

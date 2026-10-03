@@ -55,12 +55,107 @@ check() {
     "$(jstr "$6")" "$(jstr "$7")" "$(jstr "$8")"
 }
 
+# jlines [STRING...] -> a JSON array of the non-empty arguments, [] if none.
+# Empty arguments are dropped so a caller can pass an unset variable safely.
+jlines() {
+  _jl=""
+  for _jl_s in "$@"; do
+    [ -z "$_jl_s" ] && continue
+    if [ -z "$_jl" ]; then
+      _jl=$(jstr "$_jl_s")
+    else
+      _jl="$_jl,$(jstr "$_jl_s")"
+    fi
+  done
+  if [ -z "$_jl" ]; then printf '[]'; else printf '[%s]' "$_jl"; fi
+}
+
+# jrepair TIER LABEL DETAIL -> a repair object, or "null" when LABEL is empty.
+# TIER is safe|caution|manual; an unrecognised tier degrades to "manual" so an
+# unknown value is never presented as the reassuring one. DATA ONLY: nothing in
+# OmaDoctor ever executes a repair.
+jrepair() {
+  if [ -z "$2" ]; then printf 'null'; return 0; fi
+  _jr_tier=$(printf '%s' "$1" | /usr/bin/tr 'A-Z' 'a-z')
+  case "$_jr_tier" in safe | caution | manual) ;; *) _jr_tier=manual ;; esac
+  printf '{"tier":"%s","label":%s,"detail":%s}' \
+    "$_jr_tier" "$(jstr "$2")" "$(jstr "$3")"
+}
+
+# checkd ID CATEGORY STATUS SEVERITY TITLE VALUE DETAIL SUGGESTION [DETAIL...]
+#
+# As check(), plus an OPTIONAL "details" array for structured evidence -- the
+# multi-line "here is what I measured" block a single detail string cannot
+# carry (per-monitor state, one config-error line each, ...). Trailing empty
+# arguments are dropped. The field is additive: an absent key and an empty
+# array mean the same thing to Model.js, which normalises both to [].
+checkd() {
+  _cd_id=$1; _cd_cat=$2; _cd_st=$3; _cd_sv=$4
+  _cd_ti=$5; _cd_va=$6; _cd_de=$7; _cd_sg=$8
+  shift 8
+  printf '{"id":%s,"category":%s,"title":%s,"status":%s,"severity":%s,"value":%s,"detail":%s,"suggestion":%s,"details":%s}' \
+    "$(jstr "$_cd_id")" "$(jstr "$_cd_cat")" "$(jstr "$_cd_ti")" \
+    "$(jstr "$_cd_st")" "$(jnum "$_cd_sv")" \
+    "$(jstr "$_cd_va")" "$(jstr "$_cd_de")" "$(jstr "$_cd_sg")" \
+    "$(jlines "$@")"
+}
+
+# checkr ID CATEGORY STATUS SEVERITY TITLE VALUE DETAIL SUGGESTION TIER LABEL [REPAIR_DETAIL] [DETAIL...]
+#
+# As checkd(), plus an optional "repair" descriptor. TIER is safe|caution|manual
+# and LABEL is the short human description of what a fix WOULD be. DESCRIPTIVE
+# ONLY -- OmaDoctor is read-only and never runs it.
+checkr() {
+  _cr_id=$1; _cr_cat=$2; _cr_st=$3; _cr_sv=$4
+  _cr_ti=$5; _cr_va=$6; _cr_de=$7; _cr_sg=$8
+  _cr_tier=$9; shift 9
+  # Explicitly consume the two optional repair fields by COUNT, never by an
+  # over-count shift: `shift 2` with fewer args left has shell-dependent
+  # behaviour, and a masked `|| :` would hide it. If only a label was given,
+  # the second positional is empty and the label is not duplicated into
+  # repair.detail or leaked into details[].
+  _cr_rlabel=${1:-}
+  if [ "$#" -ge 2 ]; then
+    _cr_rdetail=$2
+    shift 2
+  else
+    _cr_rdetail=""
+    shift 2>/dev/null || :
+  fi
+  printf '{"id":%s,"category":%s,"title":%s,"status":%s,"severity":%s,"value":%s,"detail":%s,"suggestion":%s,"details":%s,"repair":%s}' \
+    "$(jstr "$_cr_id")" "$(jstr "$_cr_cat")" "$(jstr "$_cr_ti")" \
+    "$(jstr "$_cr_st")" "$(jnum "$_cr_sv")" \
+    "$(jstr "$_cr_va")" "$(jstr "$_cr_de")" "$(jstr "$_cr_sg")" \
+    "$(jlines "$@")" \
+    "$(jrepair "$_cr_tier" "$_cr_rlabel" "$_cr_rdetail")"
+}
+
 # Accumulate one check object into $CHECKS. This only appends a comma-separated
 # object; the enclosing [ ... ] is added once at print time by emit_json.
 # Do NOT try to bracket the first element here -- that makes every later append
 # re-close the array and produces [c1],c2],c3] garbage.
 emit() {
   _c=$(check "$@")
+  if [ -z "$CHECKS" ]; then
+    CHECKS=$_c
+  else
+    CHECKS="$CHECKS,$_c"
+  fi
+}
+
+# emitd/emitr are the emit() counterparts of checkd/checkr. All three share the
+# accumulate-bare-then-wrap-once rule above.
+emitd() {
+  _c=$(checkd "$@")
+  if [ -z "$CHECKS" ]; then
+    CHECKS=$_c
+  else
+    CHECKS="$CHECKS,$_c"
+  fi
+}
+
+emitr() {
+  _c=$(checkr "$@")
   if [ -z "$CHECKS" ]; then
     CHECKS=$_c
   else

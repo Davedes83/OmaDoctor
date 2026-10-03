@@ -48,6 +48,28 @@ for pair in "sysinfo:$SYSINFO" "audio:$AUDIO" "storage:$STORAGE"; do
 done
 check_eq "every check carries the required fields" "" "$missing"
 
+# The optional fields are additive: when present they must have a valid shape,
+# and when absent Model.js treats them as [] / null. Nothing may emit a
+# half-formed descriptor, because the report would render it verbatim.
+#   details -> array of strings
+#   repair  -> null, or an object whose tier is one of the three known levels
+OPTIONAL='all(.checks[];
+  ((has("details") | not) or (.details | type == "array" and all(.details[]; type == "string")))
+  and
+  ((has("repair") | not) or (.repair == null)
+    or (.repair | type == "object" and has("tier") and has("label")
+        and (.tier == "safe" or .tier == "caution" or .tier == "manual")))
+)'
+bad_optional=""
+for pair in "sysinfo:$SYSINFO" "audio:$AUDIO" "storage:$STORAGE"; do
+  name=${pair%%:*}
+  doc=${pair#*:}
+  if ! printf '%s' "$doc" | jq -e "$OPTIONAL" >/dev/null 2>&1; then
+    bad_optional="$bad_optional $name"
+  fi
+done
+check_eq "optional details/repair fields are well-formed" "" "$bad_optional"
+
 # --------------------------------------------------------------- schema rules
 
 # severity must be a JSON number, not a string -- Model.js compares numerically.
@@ -172,5 +194,67 @@ bad_audio=$(printf '%s' "$AUDIO" | jq -r '[.checks[]
   | select(.id == "audio.output" or .id == "audio.input")
   | select(.value | test("^[0-9]+$"))] | length')
 check_eq "audio defaults are names, not raw node ids" "0" "$bad_audio"
+
+# ---------------------------------------------------- optional field emitters
+#
+# checkd/checkr are the OPTIONAL-field variants of check/emit. Their positional
+# tails are the fragile part: a trailing argument that is absent must NOT be
+# allowed to duplicate the repair label into repair.detail or leak it into
+# details[]. These pin every arity, because that class of bug produces
+# well-formed JSON that is simply WRONG -- no validator will catch it.
+
+# emit_one BODY -> run the emitter in a clean shell and print the array.
+#
+# Uses run_interp from lib.sh rather than invoking $OMC_TEST_SH directly: that
+# variable may carry an option word ("bash --posix"), and running the whole
+# string as one command name fails. Every suite is expected to pass under
+# every interpreter the runner offers.
+emit_one() {
+  run_interp -c "
+    . '$BACKEND_DIR/common.sh'
+    CHECKS=''
+    $1
+    printf '[%s]\n' \"\$CHECKS\"
+  " 2>/dev/null
+}
+
+# The bare emit() must remain unchanged: it omits the optional keys entirely.
+# jq yields empty strings for absent keys, so test presence with has() on the
+# object itself rather than reading the (absent) values.
+check_eq "emit omits the optional fields entirely" "false false" \
+  "$(emit_one 'emit i c ok 0 T V D S' \
+    | jq -r '.[0] | [(has("details")|tostring), (has("repair")|tostring)] | join(" ")' 2>/dev/null)"
+
+# checkd: evidence lines only, and empty evidence arguments are dropped.
+check_eq "emitd collects evidence lines" '["one","three"]' \
+  "$(emit_one 'emitd i c attention 1 T V D S one "" three' | jq -c '.[0].details')"
+check_eq "emitd with no evidence yields an empty array" "[]" \
+  "$(emit_one 'emitd i c attention 1 T V D S' | jq -c '.[0].details')"
+check_eq "emitd carries no repair" "null" \
+  "$(emit_one 'emitd i c attention 1 T V D S one' | jq -r '.[0].repair')"
+
+# checkr, by arity. The label must NEVER be duplicated into repair.detail, and
+# only genuinely-supplied evidence may appear in details[].
+check_eq "checkr label only leaves detail empty and details empty" \
+  '{"tier":"safe","label":"L","detail":""}' \
+  "$(emit_one 'emitr i c problem 3 T V D S safe L' | jq -c '.[0].repair')"
+check_eq "checkr label only does not leak into details" "[]" \
+  "$(emit_one 'emitr i c problem 3 T V D S safe L' | jq -c '.[0].details')"
+check_eq "checkr with repair detail" \
+  '{"tier":"safe","label":"L","detail":"RD"}' \
+  "$(emit_one 'emitr i c problem 3 T V D S safe L RD' | jq -c '.[0].repair')"
+check_eq "checkr keeps only real evidence lines" '["e1","e2"]' \
+  "$(emit_one 'emitr i c problem 3 T V D S safe L RD e1 "" e2' | jq -c '.[0].details')"
+
+# An unrecognised tier must degrade to manual, never to the reassuring one.
+check_eq "an unknown repair tier degrades to manual" "manual" \
+  "$(emit_one 'emitr i c problem 3 T V D S banana L' | jq -r '.[0].repair.tier')"
+check_eq "a missing repair label yields a null repair" "null" \
+  "$(emit_one 'emitr i c problem 3 T V D S safe ""' | jq -r '.[0].repair')"
+
+# Values inside the optional fields go through jstr like everything else, so a
+# quote, a backslash or a newline cannot corrupt the document.
+check_eq "evidence is escaped like any other value" '["a \"q\" & \\ b"]' \
+  "$(emit_one 'emitd i c attention 1 T V D S "a \"q\" & \\ b"' | jq -c '.[0].details')"
 
 finish

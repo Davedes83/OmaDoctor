@@ -19,7 +19,7 @@ const src = fs.readFileSync(modelPath, "utf8");
 const EXPORTS = [
   "parseDoctor", "overallState", "issues", "counts", "byCategory",
   "findCheck", "fmtAge", "glyph", "stateLabel", "redact", "buildReport",
-  "buildReportText", "findingRows"
+  "buildReportText", "findingRows", "strArray", "normRepair"
 ];
 
 const ctx = vm.createContext({ JSON, Math, String, Number, Array, Object, isFinite, Date });
@@ -277,6 +277,102 @@ eq("findingRows returns nothing for an all-clear scan",
 eq("findingRows tolerates empty input", 0, M.findingRows([]).length);
 eq("findingRows tolerates null input", 0, M.findingRows(null).length);
 eq("findingRows tolerates non-array input", 0, M.findingRows("nope").length);
+
+// ------------------------------------------------- optional details + repair
+//
+// details[] and repair are ADDITIVE: a producer that omits them must parse to
+// an empty list / null, and the pre-existing detail/suggestion strings must
+// still work. These pin that contract so widening the schema can never break a
+// section script that has not been updated.
+
+eq("strArray wraps a bare scalar", ["one"], M.strArray("one"));
+eq("strArray keeps an array as-is", ["a", "b"], M.strArray(["a", "b"]));
+// "[object Object]" in a diagnostic report is worse than an absent line.
+eq("strArray drops objects, null and empty strings", ["a", "0", "b"],
+  M.strArray(["a", {}, null, "", 0, "b"]));
+eq("strArray treats absent as empty", [], M.strArray(undefined));
+eq("strArray tolerates null", [], M.strArray(null));
+
+// An unknown tier must degrade to the most dangerous one, exactly as an
+// unknown status degrades to "problem" rather than "ok".
+eq("normRepair keeps a known tier", "safe", M.normRepair({ tier: "safe", label: "x" }).tier);
+eq("normRepair lowercases the tier", "caution", M.normRepair({ tier: "CAUTION", label: "x" }).tier);
+eq("normRepair degrades an unknown tier to manual", "manual",
+  M.normRepair({ tier: "banana", label: "x" }).tier);
+eq("normRepair degrades a missing tier to manual", "manual",
+  M.normRepair({ label: "x" }).tier);
+// A repair with no label says nothing, so it is not a repair.
+eq("normRepair drops a repair with no label", null, M.normRepair({ tier: "safe" }));
+eq("normRepair drops a non-object", null, M.normRepair("restart everything"));
+eq("normRepair drops an array", null, M.normRepair([{ tier: "safe", label: "x" }]));
+
+// A check that carries none of the new fields must still normalise cleanly.
+const legacy = M.parseDoctor(JSON.stringify({
+  mode: "quick", ts: 1700000000,
+  checks: [{ id: "l.1", category: "system", title: "OS", status: "ok", severity: 0, value: "Omarchy", detail: "d", suggestion: "s" }]
+}));
+eq("a legacy check normalises details to an empty list", [], legacy.checks[0].details);
+eq("a legacy check normalises repair to null", null, legacy.checks[0].repair);
+eq("a legacy check keeps its detail and suggestion", "d/s",
+  legacy.checks[0].detail + "/" + legacy.checks[0].suggestion);
+
+// And a check that carries them keeps both intact through the round trip.
+const rich = M.parseDoctor(JSON.stringify({
+  mode: "full", ts: 1700000000,
+  checks: [{
+    id: "h.1", category: "hyprland", title: "Config errors", status: "problem",
+    severity: 3, value: "1 error", detail: "configerror", suggestion: "open config",
+    details: ["line 42: unknown keyword", "line 7: bad rule"],
+    repair: { tier: "manual", label: "Edit hypr config", detail: "OmaDoctor will not do this" }
+  }]
+}));
+eq("a rich check keeps its details array", 2, rich.checks[0].details.length);
+eq("a rich check keeps its repair tier", "manual", rich.checks[0].repair.tier);
+eq("a rich check keeps its repair label", "Edit hypr config", rich.checks[0].repair.label);
+
+// The report renders the new fields. Repairs are advisory, so the report must
+// also state plainly that nothing is executed.
+const richReport = M.buildReport(rich, { now: 1700000100 });
+if (richReport.includes("unknown keyword")) ok("report renders details[] entries");
+else fail("report renders details[] entries", richReport.slice(0, 300));
+if (richReport.includes("MANUAL")) ok("report renders the repair tier");
+else fail("report renders the repair tier", richReport.slice(0, 300));
+if (/does not/.test(richReport.split("FINDINGS")[1] || "")) {
+  ok("report disclaims running repairs");
+} else {
+  fail("report disclaims running repairs", richReport.slice(0, 300));
+}
+
+// The new fields go through the same redaction as everything else, otherwise
+// widening the schema opens a leak.
+const leaky = M.parseDoctor(JSON.stringify({
+  mode: "full", ts: 1700000000,
+  checks: [{
+    id: "n.1", category: "network", title: "Gateway", status: "problem", severity: 3,
+    value: "192.168.1.1", detail: "", suggestion: "",
+    details: ["mybox is at 192.168.1.1", "user dave on aa:bb:cc:dd:ee:ff"],
+    repair: { tier: "manual", label: "Check mybox", detail: "dave's machine" }
+  }]
+}));
+const leakyReport = M.buildReport(leaky, {
+  now: 1700000100,
+  redactInfo: { hostname: "mybox", username: "dave", home: "/home/dave" }
+});
+{
+  const leaks = ["192.168.1.1", "mybox", "dave", "aa:bb:cc:dd:ee:ff"]
+    .filter(n => leakyReport.includes(n));
+  if (leaks.length === 0) ok("details[] and repair are redacted like any other field");
+  else fail("details[] and repair are redacted like any other field", "leaked: " + leaks.join(", "));
+}
+
+// A report for a scan with no repairs must NOT carry the disclaimer, or it
+// advertises a repair capability the scan does not have.
+const legacyFindings = M.buildReport(legacy, { now: 1700000100 }).split("FINDINGS")[1] || "";
+if (legacyFindings.indexOf("Repairs are listed") === -1) {
+  ok("no repair disclaimer when nothing suggests a repair");
+} else {
+  fail("no repair disclaimer when nothing suggests a repair", legacyFindings);
+}
 
 // ------------------------------------------------------------------- summary
 
