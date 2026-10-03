@@ -732,8 +732,15 @@ function redact(text, opts) {
   s = s.replace(/\b(dev|iface|interface|ifname)\s+([A-Za-z0-9_.:-]+)/gi, "$1 <iface>");
   // Kernel-derived interface names, which are unambiguous -- no diagnostic prose
   // contains "eno1" or "wlp3s0" by accident -- so they need no keyword.
-  s = s.replace(/\b(?:enp\d\w*|eno\d|ens\d\w*|enp0s\d+\w*)\b/g, "<iface>");
-  s = s.replace(/\bwlp\d+s?\d*|wlan\d+|wl\d+s?\d*\b/g, "<iface>");
+  //
+  // Every real name has DIGITS after the prefix (enp7s0, wlp0s20f3, eno1, eth0),
+  // and requiring them keeps ordinary words out: "ethereal" is not matched.
+  //
+  // The trailing \w* is what makes this correct. A pattern ending at the digits
+  // consumed "wlp0s20" out of "wlp0s20f3" and left a dangling "f3", so the
+  // report read "Interfaces: <iface> <iface>f3" -- which redacts nothing useful
+  // while looking like it did.
+  s = s.replace(/\b(?:wlp|wlan|wl|enp|eno|ens|enx|eth)\d+[a-z0-9]*/g, "<iface>");
 
   // ------------------------------------------------------- hostname / user
   //

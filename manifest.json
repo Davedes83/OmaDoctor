@@ -5,7 +5,9 @@
   "version": "0.5.0",
   "author": "Davedes83",
   "description": "Diagnose common Omarchy system problems. Runs read-only health checks across system, network, audio and storage, explains what each finding means, and produces a redacted diagnostic report you can paste into a bug report or support channel.",
-  "kinds": ["bar-widget"],
+  "kinds": [
+    "bar-widget"
+  ],
   "entryPoints": {
     "barWidget": "Panel.qml"
   },
@@ -17,7 +19,9 @@
     "defaultSection": "right",
     "defaults": {
       "pollSeconds": 0,
-      "notifyOnProblem": true
+      "notifyOnProblem": true,
+      "askAiCommand": "",
+      "askAiModel": ""
     },
     "schema": [
       {
@@ -36,6 +40,20 @@
         "label": "Notify when a check gets worse",
         "defaultValue": true,
         "description": "Fires at most once per worsening transition, never on the first scan, and never after a scan you ran yourself."
+      },
+      {
+        "key": "askAiCommand",
+        "type": "string",
+        "label": "AI command for 'Ask AI'",
+        "defaultValue": "",
+        "description": "Full command line; the report is fed on stdin. Leave empty to auto-detect from your PATH. e.g. 'ollama run llama3.2' or 'aichat'."
+      },
+      {
+        "key": "askAiModel",
+        "type": "string",
+        "label": "Model, for assistants that require one",
+        "defaultValue": "",
+        "description": "Used for 'ollama run <model>', which has no default-model mode. Ignored by other assistants."
       }
     ]
   }

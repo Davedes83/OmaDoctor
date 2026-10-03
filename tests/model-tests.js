@@ -277,6 +277,14 @@ eq("redact masks a PCI interface name", "<iface> is down",
   M.redact("eno1 is down", {}));
 eq("redact masks a wlp interface name", "<iface> is up",
   M.redact("wlp3s0 is up", {}));
+// A pattern ending at the digits consumed "wlp0s20" out of "wlp0s20f3" and left
+// a dangling "f3", so the report read "Interfaces: <iface> <iface>f3" -- which
+// hides nothing while appearing to.
+eq("redact masks a full-length wlp interface name", "<iface> <iface>",
+  M.redact("enp7s0 wlp0s20f3", {}));
+eq("redact does not eat an ordinary word beginning with a prefix", "ethereal",
+  M.redact("ethereal", {}));
+
 
 // OmaDoctor's default hostname is literally "omarchy" and the DNS evidence
 // quotes the public site "omarchy.org". Masking a dotted token as if it were

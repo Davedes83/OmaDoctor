@@ -644,6 +644,18 @@ else
   ok "the full scan does check for updates"
 fi
 
+# storage.root_writable reads the mount option rather than attempting a write,
+# but the first guard on it rejected every real value: findmnt prints
+# "rw,noatime,compress=zstd:3,ssd,space_cache=v2,subvol=/@", which contains
+# digits, colons, slashes and an at-sign, so a "contains a non-letter" test
+# always matched and the root filesystem was permanently reported as unknown.
+root_fs=$(printf '%s' "$QUICK" | jq -r '.checks[]|select(.id=="storage.root_writable")|.status' 2>/dev/null)
+if [ "$root_fs" = "unknown" ]; then
+  fail "the root filesystem mount option is actually read" "status=$root_fs"
+else
+  ok "the root filesystem mount option is actually read"
+fi
+
 # The new workspace check, which uses the parser that already existed unused.
 ws=$(printf '%s' "$QUICK" | jq -r '[.checks[]|select(.id=="hyprland.workspaces")]|length' 2>/dev/null)
 check_eq "the scan emits a workspaces check" "1" "$ws"

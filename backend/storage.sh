@@ -116,10 +116,19 @@ fi
 # for the wrong reason (an ordinary user cannot write / for many reasons that
 # have nothing to do with the root mount being writable).
 _root_opts=$(/usr/bin/findmnt -no OPTIONS / 2>/dev/null)
-case "$_root_opts" in
-  '' | *[!a-z]*)
+# Accept only a single comma-separated option token. Real output looks like
+# "rw,noatime,compress=zstd:3,ssd,space_cache=v2,subvol=/@" -- digits, colons,
+# slashes and an at-sign are all normal, so the guard has to be a positive
+# whitelist rather than a "contains a non-letter" test, which rejected every
+# real value and reported the root filesystem as unknown.
+case "$(printf '%s' "$_root_opts" | /usr/bin/tr -d '\n\r')" in
+  '')
     emit "storage.root_writable" storage info 0 "Root filesystem" "unknown" \
       "findmnt did not report options for /" ""
+    ;;
+  *[!A-Za-z0-9,=_:./@+-]*)
+    emit "storage.root_writable" storage info 0 "Root filesystem" "unknown" \
+      "findmnt reported an unrecognised option string" ""
     ;;
   *ro*)
     emit "storage.root_writable" storage ok 0 "Root filesystem" "read-only" \

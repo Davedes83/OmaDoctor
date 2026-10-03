@@ -484,8 +484,17 @@ Panel {
 
     function copyReport(): void { root.copyReport() }
 
+    // Ask AI is scriptable too, but it still goes through the confirmation
+    // sheet -- an IPC caller cannot bypass consent.
+    function askAi(): void { root.askAi() }
+    function copyAiPrompt(): void { root.copyAiPrompt() }
+
     function state(): string {
       return JSON.stringify({
+        ai: root.resolvedAiCommand,
+        aiDetected: Object.keys(root.aiOnPath).sort(),
+        aiRunning: root.aiRunning,
+        aiAnswerPath: root.aiAnswerPath,
         ready: root.ready,
         opened: root.opened,
         scanning: root.scanning,
@@ -550,6 +559,24 @@ Panel {
     }
   }
 
+  // The clipboard needs one more variable than the scanner does.
+  //
+  // wl-copy talks to the compositor over WAYLAND_DISPLAY, and on this machine
+  // that is "wayland-1" -- Hyprland does not use the "wayland-0" name wl-copy
+  // falls back to. Under trustedEnv() alone, wl-copy failed with "Failed to
+  // connect to a Wayland server" and exited 1, so Copy report silently copied
+  // NOTHING on every run, while the README documented it as the way to get a
+  // report. The old code announced success without reading the exit status, so
+  // even the failure was invisible.
+  //
+  // WAYLAND_DISPLAY grants no capability beyond writing to the user's own
+  // clipboard, which is the entire point of the button. PATH stays pinned.
+  function clipboardEnv() {
+    var env = root.trustedEnv()
+    env.WAYLAND_DISPLAY = Quickshell.env("WAYLAND_DISPLAY") || ""
+    return env
+  }
+
   function capText(text) {
     return typeof text === "string" && text.length > root.maxOutputBytes
       ? text.slice(0, root.maxOutputBytes) : (text || "")
@@ -597,7 +624,7 @@ Panel {
   Process {
     id: copyProc
     clearEnvironment: true
-    environment: root.trustedEnv()
+    environment: root.clipboardEnv()
     stdinEnabled: true
     command: ["/usr/bin/wl-copy"]
     property string pending: ""
@@ -659,6 +686,7 @@ Panel {
   Component.onCompleted: {
     root.loadBaselineFromHistory()
     hostnameProc.running = true
+    root.probeAi()
     refresh("quick")
   }
 
@@ -684,7 +712,9 @@ Panel {
   // The actions come first because they are what a user opens the panel to do.
   property bool cursorActive: false
   property int selectedIndex: -1
-  readonly property int rowCount: 2
+  // Three actions: full diagnosis, copy report, ask AI. Ask AI is last because
+  // it is the only one that can leave the machine.
+  readonly property int rowCount: 3
 
   function moveCursor(dy) {
     var n = root.rowCount
@@ -704,6 +734,325 @@ Panel {
     if (!root.cursorActive) return
     if (root.selectedIndex === 0) root.refresh("full", true)
     else if (root.selectedIndex === 1) root.copyReport()
+    else root.askAi()
+  }
+
+  // ================================================================= Ask AI
+  //
+  // The point of a diagnostic tool is that the person reading it often does not
+  // already know the answer. This hands the redacted report to WHATEVER AI the
+  // user has installed, asks it to research the problem and propose a fix, and
+  // puts the answer where they can read it.
+  //
+  // It is discover-first, not opencode-first. Hardcoding one assistant would
+  // make the plugin useless for everyone who does not have that one installed,
+  // so the AI is resolved from the user's own PATH at runtime -- probed once at
+  // startup, off the UI thread -- and can be overridden with a single setting
+  // for anything this list does not know about.
+  //
+  // Privacy posture, stated plainly because it is the whole tension here: this
+  // plugin promises nothing leaves the machine, and an AI query does. So nothing
+  // is ever sent on the plugin's initiative. It resolves a command, shows it,
+  // shows what will be sent, and waits for confirmation. The no-send path (copy
+  // the prompt and paste it yourself) is always available.
+
+  // Each candidate accepts a prompt on STDIN and prints a reply on stdout.
+  //
+  // This list is a convenience, not a contract. Anything not in it works
+  // through the askAiCommand setting, which takes a full command line.
+  readonly property var aiCandidates: [
+    "opencode run",        // reads the prompt on stdin when given no argument
+    "mods -s",
+    "llm -s",
+    "aichat",
+    "fabric",
+    "aider --message",
+    "gemini",
+    "claude -p",
+    "codex exec"
+  ]
+
+  // Probed once at startup, under the hardened PATH so a shadow executable on
+  // the interactive PATH can never be what gets run. Maps command name -> true.
+  property var aiOnPath: ({})
+
+  readonly property string aiModel: String(root.setting("askAiModel", "") || "")
+  readonly property string aiOverride: String(root.setting("askAiCommand", "") || "").trim()
+
+  readonly property string resolvedAiCommand: {
+    if (root.aiOverride !== "") return root.aiOverride
+    for (var i = 0; i < root.aiCandidates.length; i++) {
+      var line = root.aiCandidates[i]
+      var bin = line.split(" ")[0]
+      if (!root.aiOnPath[bin]) continue
+      // ollama has no "use the default model" mode, so the model has to be
+      // named. Without one configured, skip it rather than guess.
+      if (bin === "ollama") {
+        if (root.aiModel === "") continue
+        return "ollama run " + root.aiModel
+      }
+      return line
+    }
+    return ""
+  }
+
+  function probeAi() {
+    var found = {}
+    var lines = []
+    for (var i = 0; i < root.aiCandidates.length; i++) {
+      lines.push(root.aiCandidates[i].split(" ")[0])
+    }
+    if (root.aiOnPath["ollama"]) lines.push("ollama")
+    // one "which" per distinct binary, run sequentially so the fork cost is a
+    // single short burst at startup rather than ten at once
+    var queue = []
+    var seen = {}
+    for (var j = 0; j < lines.length; j++) {
+      if (!lines[j] || seen[lines[j]]) continue
+      seen[lines[j]] = true
+      queue.push(lines[j])
+    }
+    aiProbeQueue = queue
+    aiProbeFound = found
+    aiProbeNext()
+  }
+
+  property var aiProbeQueue: []
+  property var aiProbeFound: ({})
+  property int aiProbeIndex: 0
+
+  function aiProbeNext() {
+    if (aiProbeIndex >= aiProbeQueue.length) {
+      aiOnPath = aiProbeFound
+      return
+    }
+    aiProbeProc.name = aiProbeQueue[aiProbeIndex]
+    aiProbeProc.command = ["/usr/bin/which", aiProbeProc.name]
+    aiProbeProc.running = true
+  }
+
+  // Probed WITHOUT clearEnvironment, unlike every other process in this file.
+  //
+  // The backend's pinned PATH=/usr/bin:/bin is a security control: it stops a
+  // shadow executable anywhere on the interactive PATH from being resolved for
+  // something that inspects the machine. That reasoning does not transfer to
+  // finding the USER'S OWN assistant. Package managers put these in
+  // ~/.local/bin, nix profiles, mise shims, /opt; opencode on this machine is
+  // under ~/.local/share/mise and is simply not visible to /usr/bin. Probing
+  // with the hardened PATH finds nothing and reports "no AI installed" on a
+  // machine that has one.
+  //
+  // Nothing is executed during discovery -- only `which <name>` -- and the
+  // result is still only a suggestion the user confirms before anything runs.
+  Process {
+    id: aiProbeProc
+    property string name: ""
+    // SplitParser inherits DataStreamParser's `read(data)` and re-emits it per
+    // split chunk. It has no onStreamReceived: naming one is not a warning, it
+    // is "Cannot assign to non-existent property", which fails the whole
+    // widget load and silently removes it from the bar.
+    stdout: SplitParser {
+      onRead: function(data) {
+        if (String(data).trim() !== "") aiProbeFound[aiProbeProc.name] = true
+      }
+    }
+    // Sequentially, one `which` at a time: ten short-lived processes at once is
+    // a burst of forks for something whose answer is needed exactly once.
+    onExited: function(exitCode) {
+      aiProbeIndex = aiProbeIndex + 1
+      aiProbeNext()
+    }
+  }
+
+  // Split a command line into an argv, honouring quotes so a path or model name
+  // containing a space survives. The result is passed straight to Process.command
+  // -- never to a shell, so nothing in it can be interpreted as syntax.
+  function splitCommand(line) {
+    var out = []
+    var cur = ""
+    var quote = ""
+    var has = false
+    for (var i = 0; i < line.length; i++) {
+      var ch = line.charAt(i)
+      if (quote !== "") {
+        if (ch === quote) { quote = ""; continue }
+        cur += ch; has = true; continue
+      }
+      if (ch === "'" || ch === "\"") { quote = ch; has = true; continue }
+      if (ch === " " || ch === "\t") {
+        if (has) { out.push(cur); cur = ""; has = false }
+        continue
+      }
+      cur += ch; has = true
+    }
+    if (has) out.push(cur)
+    return out
+  }
+
+  function askAiPrompt() {
+    return "A system diagnostic report from OmaDoctor, a read-only diagnostic " +
+      "tool for Omarchy, is below. It has already been redacted.\n\n" +
+      root.reportText() +
+      "\n\n---\n\nPlease do the following:\n" +
+      "1. Identify every finding that indicates a real fault, and say which are " +
+      "expected on a healthy machine.\n" +
+      "2. Search the web for each real fault: the upstream issue tracker, the " +
+      "Arch Linux forums, the Hyprland or Omarchy documentation, or the " +
+      "project's own bug tracker.\n" +
+      "3. For each, give the most likely cause and a specific fix, with the " +
+      "commands to run or the file to edit.\n" +
+      "4. Say plainly where you are guessing, and cite a URL for every claim " +
+      "you did not derive from the report itself.\n\n" +
+      "OmaDoctor never repairs anything, so nothing in the report has already " +
+      "been changed."
+  }
+
+  // askAi() -> resolve, confirm, run. Never sends without the confirmation.
+  function askAi() {
+    if (!root.ready) {
+      root.notify("OmaDoctor", "No scan yet -- run a diagnosis first.",
+        Model.glyph("info"), "normal")
+      return
+    }
+    if (root.aiRunning) {
+      root.notify("OmaDoctor", "An AI query is already running.",
+        Model.glyph("info"), "normal")
+      return
+    }
+    if (root.resolvedAiCommand === "") {
+      // Nothing installed that this plugin knows how to drive. Do not silently
+      // do nothing: hand over the prompt so the feature still works with
+      // whatever the user actually has.
+      root.copyText(root.askAiPrompt())
+      root.notify("OmaDoctor",
+        "No supported AI CLI found -- the prompt is on your clipboard.",
+        Model.glyph("attention"), "normal")
+      return
+    }
+    root.aiPendingPrompt = root.askAiPrompt()
+    root.aiConfirmOpened = true
+  }
+
+  // The no-send path: always available, works with any assistant at all.
+  function copyAiPrompt() {
+    root.copyText("Ask AI about these OmaDoctor findings:\n\n" + root.askAiPrompt())
+  }
+
+  // copyText(text) -> the clipboard, via one guarded stdin writer.
+  function copyText(text) {
+    if (copyProc.running) return false
+    copyProc.pending = String(text || "")
+    copyProc.running = true
+    return true
+  }
+
+  function runAi() {
+    var argv = root.splitCommand(root.resolvedAiCommand)
+    if (argv.length === 0) return
+    root.aiConfirmOpened = false
+    root.aiRunning = true
+    aiProc.command = argv
+    aiProc.pending = root.aiPendingPrompt
+    aiProc.output = ""
+    aiProc.running = true
+  }
+
+  function cancelAi() {
+    root.aiConfirmOpened = false
+  }
+
+  // A short, safe preview of what will be sent. The prompt is multi-kilobyte;
+  // the point is for the user to recognise it, not to read it. Shown through
+  // the SAME redactor as the report, so the preview cannot leak what the report
+  // itself would not.
+  readonly property string aiPreview: {
+    if (!root.aiPendingPrompt) return ""
+    var r = Model.redact(root.aiPendingPrompt, root.redactInfo)
+    if (r.length > 300) r = r.slice(0, 300) + "..."
+    return r
+  }
+
+  property string aiPendingPrompt: ""
+  property bool aiConfirmOpened: false
+  property bool aiRunning: false
+  readonly property string aiAnswerPath: root.stateDir + "/ai-answer.txt"
+
+  // Also inherits the environment, and this is deliberate for the same reason.
+  // An assistant CLI needs the things the hardened environment deliberately
+  // withholds: its API credentials, its own PATH entry so it can find node or
+  // python, and its config directory. Running one under PATH=/usr/bin:/bin
+  // with no HOME-derived variables would fail on most machines.
+  //
+  // The trade-off is explicit: this process runs the user's own tool, with the
+  // user's own environment, on a command the user has just confirmed. It is not
+  // a security boundary -- which is exactly why it cannot be triggered by
+  // anything except a click or an explicit IPC call that still opens the
+  // confirmation sheet.
+  Process {
+    id: aiProc
+    // The prompt goes on stdin, never in argv: argv is world-readable in
+    // /proc, and the prompt carries the user's machine details.
+    stdinEnabled: true
+    // An assistant with web search enabled can take minutes. This is not the
+    // scan budget; it is a separate, much longer deadline.
+    property string pending: ""
+    property string output: ""
+    onStarted: {
+      if (aiProc.pending !== "") aiProc.write(aiProc.pending)
+      // Read to EOF, or the assistant never sees the prompt.
+      aiProc.stdinEnabled = false
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: aiProc.output += String(text || "")
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: aiProc.output += String(text || "")
+    }
+    onExited: function(exitCode) {
+      if (aiProc.stdinEnabled === false) aiProc.stdinEnabled = true
+      aiProc.pending = ""
+      root.aiRunning = false
+      var answer = String(aiProc.output || "").trim()
+      aiProc.output = ""
+      if (answer === "") answer = "(the assistant returned nothing)"
+      // Saved and copied: the file so it can be reopened or attached to an
+      // issue, the clipboard because that is where the user is looking.
+      root.saveAiAnswer(answer)
+      root.copyText(answer)
+      root.notify("OmaDoctor",
+        exitCode === 0
+          ? "AI answer copied and saved to " + root.aiAnswerPath
+          : "AI exited " + exitCode + " -- output copied anyway",
+        Model.glyph(exitCode === 0 ? "ok" : "attention"),
+        exitCode === 0 ? "normal" : "critical")
+    }
+  }
+
+  // Written with tee rather than FileView: no plugin in this shell writes
+  // through FileView, whereas Process is already the proven path here.
+  Process {
+    id: aiSaveProc
+    clearEnvironment: true
+    environment: root.trustedEnv()
+    stdinEnabled: true
+    property string pending: ""
+    onStarted: {
+      if (aiSaveProc.pending !== "") aiSaveProc.write(aiSaveProc.pending)
+      aiSaveProc.stdinEnabled = false
+    }
+    onExited: function(exitCode) {
+      if (aiSaveProc.stdinEnabled === false) aiSaveProc.stdinEnabled = true
+      aiSaveProc.pending = ""
+    }
+  }
+
+  function saveAiAnswer(text) {
+    if (aiSaveProc.running) return
+    aiSaveProc.command = ["/usr/bin/tee", root.aiAnswerPath]
+    aiSaveProc.pending = String(text || "") + "\n"
+    aiSaveProc.running = true
   }
 
   // ---------------------------------------------------------- the bar icon
@@ -749,10 +1098,145 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      onMoveRequested: function(dx, dy) { root.moveCursor(dy) }
-      onActivateRequested: root.activateCursor()
-      onCloseRequested: root.close()
-      onTabRequested: function(direction) { root.switchPanel(direction) }
+      // While the AI confirmation is up, the panel's own cursor must not move
+      // and Enter must not start another scan. The overlay handles its own keys.
+      onMoveRequested: function(dx, dy) { if (!root.aiConfirmOpened) root.moveCursor(dy) }
+      onActivateRequested: if (!root.aiConfirmOpened) root.activateCursor()
+      onCloseRequested: root.aiConfirmOpened ? root.cancelAi() : root.close()
+      onTabRequested: function(direction) { if (!root.aiConfirmOpened) root.switchPanel(direction) }
+
+      // ------------------------------------------------- Ask AI confirmation
+      //
+      // A modal over the panel, because this is the one action that can send
+      // data off the machine. It states the exact command that will run, shows
+      // a preview of the text that will be sent, and offers three ways out:
+      // send it, copy it instead, or cancel.
+      // BorderSurface, not Rectangle: `borderSpec` is a BorderSurface property,
+      // and assigning it to a plain Rectangle is "Cannot assign to non-existent
+      // property" -- which fails the whole widget load and silently removes the
+      // plugin from the bar with nothing but one journal line to show for it.
+      BorderSurface {
+        id: aiSheet
+        anchors.fill: parent
+        visible: root.aiConfirmOpened
+        color: Util.alpha(Color.background, 0.94)
+        borderSpec: Border.flat(root.accent, Style.normalBorderWidth)
+        radius: Style.cornerRadius
+
+        FocusScope {
+          anchors.fill: parent
+          focus: visible
+          Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_Escape) { root.cancelAi(); event.accepted = true; return }
+            if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+              root.runAi(); event.accepted = true; return
+            }
+            if (event.text === "c") { root.copyAiPrompt(); root.cancelAi(); event.accepted = true }
+          }
+
+          Column {
+            anchors.fill: parent
+            anchors.margins: Style.space(16)
+            spacing: Style.spacing.md
+
+            Text {
+              width: parent.width
+              text: "Send this report to your AI?"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+
+            Text {
+              width: parent.width
+              text: "Command:  " + root.resolvedAiCommand
+              color: root.accent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WrapAnywhere
+              elide: Text.ElideRight
+              maximumLineCount: 2
+            }
+
+            Text {
+              width: parent.width
+              text: root.resolvedAiCommand.indexOf("ollama ") === 0
+                ? "A LOCAL model runs this. Nothing leaves your machine."
+                : "This sends the redacted report to a remote provider. Read it before you continue."
+              color: root.resolvedAiCommand.indexOf("ollama ") === 0
+                ? root.foreground : root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            BorderSurface {
+              width: parent.width
+              height: Math.min(Style.space(150), aiPreviewText.implicitHeight + Style.space(12))
+              color: Util.alpha(root.foreground, 0.06)
+              radius: Style.cornerRadius
+              borderSpec: Border.flat(Util.alpha(root.foreground, 0.15), 1)
+
+              Text {
+                id: aiPreviewText
+                anchors.fill: parent
+                anchors.margins: Style.space(6)
+                text: root.aiPreview
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WrapAnywhere
+                elide: Text.ElideRight
+              }
+            }
+
+            Text {
+              width: parent.width
+              text: "Enter sends   ·   c copies the prompt instead   ·   Esc cancels"
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Item { width: 1; height: 0 }
+
+            Row {
+              width: parent.width
+              spacing: Style.spacing.sm
+
+              Button {
+                width: Math.max(1, (parent.width - Style.spacing.sm * 2) / 3)
+                text: "Send"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                fontSize: Style.font.bodySmall
+                onClicked: root.runAi()
+              }
+              Button {
+                width: Math.max(1, (parent.width - Style.spacing.sm * 2) / 3)
+                text: "Copy"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                fontSize: Style.font.bodySmall
+                onClicked: { root.copyAiPrompt(); root.cancelAi() }
+              }
+              Button {
+                width: Math.max(1, (parent.width - Style.spacing.sm * 2) / 3)
+                text: "Cancel"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                fontSize: Style.font.bodySmall
+                onClicked: root.cancelAi()
+              }
+            }
+          }
+        }
+      }
 
       Flickable {
         id: scroll
@@ -871,14 +1355,32 @@ Panel {
               onClicked: root.copyReport()
             }
 
+            Button {
+              id: aiButton
+              iconText: "󰚩"
+              text: "Ask AI"
+              tooltipText: root.resolvedAiCommand !== ""
+                ? "Send the redacted report to " + root.resolvedAiCommand
+                : "Copy a ready-to-paste prompt (no AI CLI found)"
+              foreground: root.foreground
+              accent: root.accent
+              bordered: true
+              enabled: root.ready && !root.aiRunning
+              hasCursor: root.cursorActive && root.selectedIndex === 2
+              fontSize: Style.font.bodySmall
+              horizontalPadding: Style.spacing.controlPaddingX - Style.space(2)
+              verticalPadding: Style.spacing.controlPaddingY - Style.space(1)
+              onClicked: root.askAi()
+            }
+
             // Fill whatever horizontal space the two labelled buttons leave,
             // whatever their theme-driven widths turn out to be. The old fixed
             // subtraction (two 22px icon buttons) would now overflow the Row.
             Text {
               anchors.verticalCenter: parent.verticalCenter
               width: Math.max(0, parent.width
-                     - fullButton.width - copyButton.width
-                     - Style.spacing.sm * 2)
+                     - fullButton.width - copyButton.width - aiButton.width
+                     - Style.spacing.sm * 3)
               text: root.scanning
                 ? "scanning..."
                 : (root.ready ? "last checked " + Model.fmtAge(Number(root.scan.ts || 0), root.nowSec) : "")
