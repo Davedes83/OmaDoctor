@@ -17,7 +17,7 @@
 # a missing check must never be mistaken for a healthy one.
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/bootstrap.sh"
 
-VERSION="0.4.0"
+VERSION="0.5.0"
 
 MODE=quick
 CHECKS_ONLY=0
@@ -115,5 +115,48 @@ fi
 printf '%s\n' "$TS" > "$OMADOCTOR_STATE_DIR/last-scan.ts.tmp.$$" 2>/dev/null \
   && /usr/bin/mv -f "$OMADOCTOR_STATE_DIR/last-scan.ts.tmp.$$" \
                 "$OMADOCTOR_STATE_DIR/last-scan.ts" 2>/dev/null
-
+# --------------------------------------------------------------- history
+#
+# Bounded status history, for "what changed since ...". Two deliberate limits:
+#
+#   * ONLY on full scans. A quick scan runs every 30s on a timer; writing one
+#     history file per poll would be thousands of files a day of churn for a
+#     feature nobody is looking at. A full scan is user-initiated and
+#     infrequent, so it is the natural checkpoint.
+#   * a COMPACT status map, not the whole document. A full snapshot is ~7KB of
+#     which the diff needs only id and status; this is ~1KB. diffScans takes
+#     titles and values from the CURRENT scan, so nothing is lost.
+#
+# The point of the history is to survive a shell restart: without it the first
+# scan after `omarchy restart shell` has no baseline and reports nothing, which
+# is precisely when a user most wants to know what moved.
+if [ "$MODE" = "full" ]; then
+  HIST_DIR="$OMADOCTOR_STATE_DIR/history"
+  if mkdir -p "$HIST_DIR" 2>/dev/null; then
+    _hist=$(printf '%s' "$CHECKS_ARRAY" | jq -c \
+      'map({key: .id, value: .status}) | from_entries' 2>/dev/null)
+    if [ -n "$_hist" ]; then
+      _htmp="$HIST_DIR/.$TS.$$"
+      if printf '{"ts":%s,"status":%s}\n' "$TS" "$_hist" > "$_htmp" 2>/dev/null; then
+        /usr/bin/mv -f "$_htmp" "$HIST_DIR/$TS.json" 2>/dev/null \
+          || /usr/bin/rm -f "$_htmp" 2>/dev/null
+        # Keep the newest 20. The FILENAME is the epoch, so sort by name rather
+        # than by mtime: `ls -1t` orders by modification time, which is wrong
+        # here. Two scans in the same second share an mtime and tie-break
+        # arbitrarily, and a restored or copied history has mtimes unrelated to
+        # when a scan ran. Sorting zero-padded epoch filenames
+        # lexicographically IS chronological.
+        #
+        # The grep skips the .tmp.$$ file an in-flight write leaves behind, and
+        # anything that is not <digits>.json.
+        for _old in $(/usr/bin/ls -1 "$HIST_DIR" 2>/dev/null \
+                        | /usr/bin/grep '^[0-9][0-9]*\.json$' \
+                        | /usr/bin/sort \
+                        | /usr/bin/head -n -20); do
+          /usr/bin/rm -f "$HIST_DIR/$_old" 2>/dev/null
+        done
+      fi
+    fi
+  fi
+fi
 exit 0

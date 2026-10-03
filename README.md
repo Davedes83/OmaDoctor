@@ -126,6 +126,31 @@ The policy is `Model.shouldNotify` in [`Model.js`](Model.js), which is
 unit-tested as a truth table because a notification rule can otherwise only be
 verified by waiting for something to go wrong.
 
+## What changed
+
+The panel shows a single line when something moved since the previous scan —
+`1 new issue (Gateway) since the last scan`, or `2 issues resolved`. It is
+muted unless something got worse.
+
+It reports **status transitions only, never changed values**. Uptime ticks,
+latency jitters and memory drifts on every scan; a line that always has
+something to say is the same noise problem as a chatty notification. A check
+whose reading moved while its status held is not news.
+
+A check that *disappears* is deliberately not reported as resolved. That
+usually means a section stopped running, and calling it fixed would be the most
+misleading thing this panel could do.
+
+Short history is kept in `~/.local/state/omadoctor/history/` so the feature
+survives a shell restart — otherwise it would be silent exactly when you most
+want it, right after logging in. Two deliberate limits:
+
+- **Written on full scans only.** A quick scan runs every 30 seconds; one file
+  per poll would be thousands of files a day.
+- **Capped at the newest 20, ~80 KB total.** Each entry is a compact
+  `{"id":"status"}` map (~1 KB), not a full scan document (~7 KB) — the diff
+  only needs status, and takes titles and values from the current scan.
+
 ## Privacy
 
 Everything runs locally. There is no telemetry and nothing is uploaded.

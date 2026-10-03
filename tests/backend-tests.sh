@@ -394,4 +394,93 @@ check_eq "a missing repair label yields a null repair" "null" \
 check_eq "evidence is escaped like any other value" '["a \"q\" & \\ b"]' \
   "$(emit_one 'emitd i c attention 1 T V D S "a \"q\" & \\ b"' | jq -c '.[0].details')"
 
+# ------------------------------------------------------------- scan history
+#
+# The history exists so "what changed" survives a shell restart. Two properties
+# matter and both are checked here rather than trusted:
+#
+#   * it is written on FULL scans only. A quick scan runs every 30s; writing one
+#     file per poll would be thousands of files a day for a feature nobody is
+#     looking at.
+#   * it stays BOUNDED. An unbounded history is a slow disk leak on a machine
+#     that is supposed to be well behaved.
+# bootstrap.sh defaults this to $HOME/.local/state/omadoctor. The variable is
+# NOT exported into this script, so it must be recomputed here -- reading an
+# unset $OMADOCTOR_STATE_DIR yields "/history", a root path that silently
+# collects nothing and makes every assertion below fail for the wrong reason.
+: "${OMADOCTOR_STATE_DIR:=$HOME/.local/state/omadoctor}"
+HIST_DIR="$OMADOCTOR_STATE_DIR/history"
+
+hist_count() { /bin/ls -1 "$HIST_DIR" 2>/dev/null | /usr/bin/grep -c '^[0-9][0-9]*\.json$' || printf '0'; }
+# The newest entry by FILENAME, which is the epoch. Sorting by name rather than
+# mtime is deliberate and is what doctor.sh does; see the prune assertion below.
+hist_newest() { /bin/ls -1 "$HIST_DIR" 2>/dev/null | /usr/bin/grep '^[0-9][0-9]*\.json$' | /usr/bin/sort | tail -n 1; }
+# Numeric comparison, not the test builtin: `[ "1791024658" -gt "1791024649" ]`
+# is a STRING compare in POSIX sh, and filenames carry a .json suffix. Strip it
+# and compare as numbers or the assertion is meaningless.
+hist_newest_ts() { h=$(hist_newest); printf '%s' "${h%.json}"; }
+# gt NUM_A NUM_B -> true when A is numerically newer than B.
+gt() { [ "$1" -gt "$2" ] 2>/dev/null; }
+
+before_newest=$(hist_newest_ts)
+run "$BACKEND_DIR/doctor.sh" quick >/dev/null
+after_quick_newest=$(hist_newest_ts)
+# The check is "no NEWER file", not "more files": the directory is usually
+# already at its cap, so a count comparison would pass trivially or fail
+# spuriously depending on prior state.
+check_eq "a quick scan writes no history" "$before_newest" "$after_quick_newest"
+
+run "$BACKEND_DIR/doctor.sh" full >/dev/null
+after_full_newest=$(hist_newest_ts)
+if [ -n "$after_full_newest" ] && gt "$after_full_newest" "$before_newest"; then
+  ok "a full scan writes a newer history entry"
+else
+  fail "a full scan writes a newer history entry" \
+    "before=$before_newest after=$after_full_newest"
+fi
+
+# Every entry must be the COMPACT form -- a status map, not a whole document.
+# A full snapshot here would be ~7x the size for data the diff never reads.
+newest=$(hist_newest)
+if [ -n "$newest" ]; then
+  hist_shape=$(jq -r 'if (.status | type) == "object" and (has("checks") | not)
+                     then "compact" else "wrong" end' "$HIST_DIR/$newest" 2>/dev/null)
+  check_eq "history stores a compact status map, not a full document" "compact" "$hist_shape"
+
+  hist_ids=$(jq -r '.status | keys | length' "$HIST_DIR/$newest" 2>/dev/null)
+  scan_ids=$(printf '%s' "$FULL" | jq -r '.checks | length')
+  if [ "$hist_ids" -gt 0 ] && [ "$hist_ids" -le "$scan_ids" ]; then
+    ok "history covers the scan's checks ($hist_ids of $scan_ids)"
+  else
+    fail "history covers the scan's checks" "hist=$hist_ids scan=$scan_ids"
+  fi
+else
+  fail "history stores a compact status map, not a full document" "no history file"
+  fail "history covers the scan's checks" "no history file"
+fi
+
+# The cap. Seed well past the limit with names that sort chronologically (the
+# filename IS the epoch), then force a prune.
+for i in $(seq 1 26); do
+  printf '{"ts":%s,"status":{"a":"ok"}}\n' "$((1700000000 + i))" \
+    > "$HIST_DIR/$((1700000000 + i)).json" 2>/dev/null
+done
+run "$BACKEND_DIR/doctor.sh" full >/dev/null
+pruned=$(hist_count)
+if [ "$pruned" -le 20 ]; then
+  ok "history is capped at 20 entries (kept $pruned)"
+else
+  fail "history is capped at 20 entries" "kept=$pruned"
+fi
+
+# The newest entry must SURVIVE the prune. Sorting by mtime is wrong here: two
+# scans in the same second share an mtime and tie-break arbitrarily, which
+# silently deleted the genuinely newest file during development.
+newest_after=$(hist_newest_ts)
+if [ -n "$newest_after" ] && gt "$newest_after" "$((1700000000 + 26))"; then
+  ok "the newest history entry survives the prune"
+else
+  fail "the newest history entry survives the prune" "newest=$newest_after"
+fi
+
 finish

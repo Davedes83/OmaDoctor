@@ -20,7 +20,7 @@ const EXPORTS = [
   "parseDoctor", "overallState", "issues", "counts", "byCategory",
   "findCheck", "weight", "normStatus", "fmtAge", "glyph", "stateLabel", "redact", "buildReport",
   "buildReportText", "findingRows", "strArray", "normRepair",
-  "shouldNotify", "notificationText"
+  "shouldNotify", "notificationText", "diffScans", "changeSummary"
 ];
 
 const ctx = vm.createContext({ JSON, Math, String, Number, Array, Object, isFinite, Date });
@@ -297,6 +297,165 @@ eq("byCategory ordering is stable regardless of input order",
   "system,services,hyprland",
   M.byCategory([{ category: "hyprland" }, { category: "services" }, { category: "system" }])
     .map(b => b.category).join(","));
+
+// --------------------------------------------------------------- what changed
+//
+// The point of diffScans is to be QUIET. Almost every value in a scan moves on
+// every scan -- uptime ticks, latency jitters, memory drifts -- so a value diff
+// would always have something in it and the user would learn to ignore it.
+// Only a STATUS transition by check id is news.
+
+function scanOf(checks) {
+  return M.parseDoctor(JSON.stringify({ mode: "quick", ts: 1700000000, checks }));
+}
+
+const C = (id, cat, title, status, value) =>
+  ({ id, category: cat, title, status, severity: status === "problem" ? 3 : (status === "attention" ? 1 : 0), value: value || "" });
+
+// A value moving while the status holds is not a change.
+{
+  const a = scanOf([C("s.uptime", "system", "Uptime", "info", "2d 3h")]);
+  const b = scanOf([C("s.uptime", "system", "Uptime", "info", "2d 4h")]);
+  const d = M.diffScans(a, b);
+  eq("a value moving under an unchanged status is not a change", false, d.changed);
+  eq("an unchanged check is counted as same", 1, d.same);
+}
+
+// A status transition IS a change.
+{
+  const a = scanOf([C("n.gw", "network", "Gateway", "ok", "12 ms")]);
+  const b = scanOf([C("n.gw", "network", "Gateway", "problem", "unreachable")]);
+  const d = M.diffScans(a, b);
+  eq("ok -> problem is a change", true, d.changed);
+  eq("the worse transition is reported", 1, d.worse.length);
+  eq("nothing is reported as better", 0, d.better.length);
+  eq("the transition records where it came from", "ok", d.worse[0].from);
+  eq("the transition records where it went", "problem", d.worse[0].to);
+  // The CURRENT reading is what the user needs, not the old one.
+  eq("the transition carries the current value", "unreachable", d.worse[0].value);
+  eq("the transition carries the check title", "Gateway", d.worse[0].title);
+}
+
+// Recovery is a change too, and lands in `better`.
+{
+  const a = scanOf([C("a.vol", "audio", "Output volume", "problem", "0%")]);
+  const b = scanOf([C("a.vol", "audio", "Output volume", "ok", "62%")]);
+  const d = M.diffScans(a, b);
+  eq("problem -> ok is a change", true, d.changed);
+  eq("the recovery is reported as better", 1, d.better.length);
+  eq("nothing is reported as worse", 0, d.worse.length);
+}
+
+// ok and info are the same weight, so moving between them is NOT a transition.
+{
+  const a = scanOf([C("s.os", "system", "OS", "ok", "Omarchy")]);
+  const b = scanOf([C("s.os", "system", "OS", "info", "Omarchy")]);
+  eq("ok -> info is not a change", false, M.diffScans(a, b).changed);
+}
+
+// A check that appears or disappears is not a transition. A vanished check
+// usually means a section stopped running, and calling that "fixed" would be
+// the most misleading thing this feature could do.
+{
+  const a = scanOf([C("a.b", "audio", "Devices", "problem", "0")]);
+  const b = scanOf([]);
+  const d = M.diffScans(a, b);
+  eq("a vanished check is not reported as resolved", 0, d.better.length);
+  eq("a vanished check is not a worsening", 0, d.worse.length);
+  eq("a vanished check counts as same", 1, d.same);
+}
+{
+  const a = scanOf([]);
+  const b = scanOf([C("a.b", "audio", "Devices", "problem", "0")]);
+  eq("a newly appeared check is not a new issue", 0, M.diffScans(a, b).worse.length);
+}
+
+// No baseline means nothing can have changed. That is the first-scan case.
+eq("no baseline is not a change", false,
+  M.diffScans(null, scanOf([C("a", "audio", "x", "problem", "y")])).changed);
+eq("no current scan is not a change", false,
+  M.diffScans(scanOf([C("a", "audio", "x", "problem", "y")]), null).changed);
+eq("two nulls are not a change", false, M.diffScans(null, null).changed);
+eq("malformed scans do not fabricate a change", false,
+  M.diffScans({}, { checks: "not an array" }).changed);
+// A no-baseline diff must also be empty, not merely flagged unchanged, so a
+// caller that reads .worse/.better cannot pick up a phantom.
+eq("a no-baseline diff carries no transitions", "0/0",
+  M.diffScans(null, scanOf([C("a", "audio", "x", "problem", "y")]))
+    .worse.length + "/" + M.diffScans(null, null).better.length);
+
+// Both directions at once, and worst-first ordering within each group.
+{
+  const a = scanOf([
+    C("n.1", "network", "Gateway", "ok", "12 ms"),
+    C("a.1", "audio", "Output volume", "ok", "62%"),
+    C("s.1", "system", "Failed services", "attention", "1 failed"),
+    C("d.1", "display", "Outputs", "ok", "2 active")
+  ]);
+  const b = scanOf([
+    C("n.1", "network", "Gateway", "problem", "unreachable"),
+    C("a.1", "audio", "Output volume", "ok", "62%"),
+    C("s.1", "system", "Failed services", "problem", "2 failed"),
+    C("d.1", "display", "Outputs", "ok", "2 active")
+  ]);
+  const d = M.diffScans(a, b);
+  eq("mixed changes are detected", true, d.changed);
+  eq("both worsenings are reported", 2, d.worse.length);
+  // A problem outranks an attention in the same group.
+  eq("worsenings are ordered worst-first", "problem", d.worse[0].to);
+  eq("unchanged checks are counted", 2, d.same);
+  eq("nothing improved", 0, d.better.length);
+}
+
+// Identical scans are the common case and must be completely silent.
+{
+  const same = scanOf([C("a", "audio", "x", "ok", "1"), C("b", "system", "y", "problem", "2")]);
+  const d = M.diffScans(same, same);
+  eq("an identical scan is not a change", false, d.changed);
+  eq("an identical scan counts every check as same", 2, d.same);
+}
+
+// ------------------------------------------------------------ changeSummary
+{
+  const a = scanOf([C("n.1", "network", "Gateway", "ok", "12 ms")]);
+  const b = scanOf([C("n.1", "network", "Gateway", "problem", "unreachable")]);
+  const one = M.changeSummary(M.diffScans(a, b)) || "";
+  if (/1 new issue/.test(one) && /Gateway/.test(one)) ok("a single new issue names the check");
+  else fail("a single new issue names the check", one);
+  if (/since the last scan/.test(one)) ok("the summary says since when");
+  else fail("the summary says since when", one);
+
+  const b2 = scanOf([C("n.1", "network", "Gateway", "ok", "12 ms")]);
+  eq("a summary with nothing to say is null", null,
+    M.changeSummary(M.diffScans(a, b2)));
+  eq("a null diff has no summary", null, M.changeSummary(null));
+
+  // Grammatical agreement matters in a user-facing line.
+  const two = M.changeSummary(M.diffScans(
+    scanOf([C("x", "audio", "x", "ok", ""), C("y", "system", "y", "ok", "")]),
+    scanOf([C("x", "audio", "x", "problem", ""), C("y", "system", "y", "problem", "")])
+  )) || "";
+  if (/2 new issues/.test(two)) ok("several new issues are pluralised");
+  else fail("several new issues are pluralised", two);
+
+  const resolved = M.changeSummary(M.diffScans(
+    scanOf([C("x", "audio", "x", "problem", "")]),
+    scanOf([C("x", "audio", "x", "ok", "")])
+  )) || "";
+  if (/1 issue resolved/.test(resolved)) ok("a single resolution is singular");
+  else fail("a single resolution is singular", resolved);
+
+  // Both at once reads as a sentence, not as two fragments.
+  const both = M.changeSummary(M.diffScans(
+    scanOf([C("x", "audio", "x", "ok", ""), C("y", "system", "y", "problem", "")]),
+    scanOf([C("x", "audio", "x", "problem", ""), C("y", "system", "y", "ok", "")])
+  )) || "";
+  if (both.indexOf("1 new issue") !== -1 && both.indexOf("1 issue resolved") !== -1) {
+    ok("a mixed change reports both directions");
+  } else {
+    fail("a mixed change reports both directions", both);
+  }
+}
 
 // ---------------------------------------------------------------- notifications
 //

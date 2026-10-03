@@ -31,7 +31,7 @@ Panel {
   property bool scanning: false
   property string lastError: ""
   property string lastMode: "quick"
-  property string pluginVersion: "0.4.0"
+  property string pluginVersion: "0.5.0"
 
   readonly property var checks: scan && Array.isArray(scan.checks) ? scan.checks : []
   readonly property string state: Model.overallState(checks)
@@ -135,6 +135,91 @@ Panel {
   // Rule 3 in Model.js.
   property string lastNotifiedState: ""
 
+  // -------------------------------------------------------- what changed
+  //
+  // The scan to compare the NEXT one against. Seeded from the on-disk history
+  // at startup so a shell restart does not blind the feature, then replaced by
+  // each completed scan.
+  //
+  // Only a STATUS transition is reported, never a changed value: uptime ticks,
+  // latency jitters and memory drifts on every scan, and a "what changed" line
+  // that always has something in it is the same noise problem as a chatty
+  // notification. See Model.diffScans.
+  property var baselineScan: null
+  property var lastDiff: null
+  readonly property string changeLine: root.lastDiff ? (Model.changeSummary(root.lastDiff) || "") : ""
+
+  // backend/bootstrap.sh defaults the state dir to $HOME/.local/state/omadoctor,
+  // and the spawner passes HOME through, so this is the same path the backend
+  // writes. Derived from HOME rather than from runnerPath: the plugin's
+  // location has nothing to do with where user state belongs.
+  readonly property string stateDir: (Quickshell.env("HOME") || "") + "/.local/state/omadoctor"
+
+  // Newest history entry, picked up once at startup. Declared as a property
+  // rather than constructed inside the function -- that is the shell's own
+  // idiom (see Commons/Color.qml), and a FileView built in a function body has
+  // no stable parent to load against.
+  //
+  // printErrors is off because a missing history directory on a first run is a
+  // normal state, not something to shout about: a diagnostic tool must never be
+  // the reason the panel misbehaves.
+  property FileView historyDirView: FileView {
+    id: historyDirView
+    path: root.stateDir + "/history"
+    watchChanges: false
+    printErrors: false
+  }
+  property FileView baselineFileView: FileView {
+    id: baselineFileView
+    path: ""
+    watchChanges: false
+    printErrors: false
+    onLoaded: root.applyBaseline(text())
+    // A truncated or absent entry simply leaves the baseline unset.
+    onLoadFailed: {}
+  }
+
+  // Seed the "what changed" baseline from disk so a shell restart does not
+  // leave the feature blind -- otherwise it is silent exactly when a user most
+  // wants to know what moved, which is right after logging in.
+  //
+  // The stored form is a compact {"id":"status"} map. diffScans reads only id
+  // and status from the baseline side (titles and values come from the current
+  // scan), so no other fields are needed.
+  function loadBaselineFromHistory() {
+    var newest = ""
+    var newestTs = -1
+    var n = historyDirView.count
+    for (var i = 0; i < n; i++) {
+      var name = historyDirView.itemAt(i).fileName
+      // Only <epoch>.json. Skips the .tmp.$$ file an in-flight write leaves.
+      if (!/^[0-9]+\.json$/.test(name)) continue
+      var ts = parseInt(name, 10)
+      if (ts > newestTs) { newestTs = ts; newest = name }
+    }
+    if (newest === "") return
+    baselineFileView.path = root.stateDir + "/history/" + newest
+  }
+
+  function applyBaseline(text) {
+    // The first scan may complete before this file finishes loading. If that
+    // has happened, the live baseline is newer and more accurate than the
+    // on-disk one, so the disk read must not clobber it.
+    if (root.scan !== null) return
+    try {
+      var parsed = JSON.parse(text)
+      if (!parsed || !parsed.status) return
+      var checks = []
+      for (var id in parsed.status) {
+        if (!Object.prototype.hasOwnProperty.call(parsed.status, id)) continue
+        checks.push({ id: id, status: parsed.status[id] })
+      }
+      if (checks.length > 0) root.baselineScan = { checks: checks }
+    } catch (e) {
+      // Malformed history is not worth reporting.
+    }
+  }
+
   function onScanFinished(raw) {
     scanning = false
     lastMode = pendingMode
@@ -146,6 +231,10 @@ Panel {
     } else {
       scan = parsed
       lastError = ""
+      // Diff BEFORE advancing the baseline: the comparison is against what was
+      // true before this scan, not against itself.
+      root.lastDiff = root.baselineScan ? Model.diffScans(root.baselineScan, parsed) : null
+      root.baselineScan = parsed
       root.maybeNotify(parsed)
     }
     if (root.queuedFull) {
@@ -319,7 +408,14 @@ Panel {
     onTriggered: root.clockSec = Math.floor(Date.now() / 1000)
   }
 
-  Component.onCompleted: refresh("quick")
+  // Seed the "what changed" baseline from disk before the first scan, so a
+  // shell restart does not leave the feature blind. Wrapped because the history
+  // directory may not exist yet on a first run, and a missing baseline is a
+  // normal state rather than an error.
+  Component.onCompleted: {
+    root.loadBaselineFromHistory()
+    refresh("quick")
+  }
 
   // Opening the panel is the moment the user is actually looking, so this is
   // where a full (network-inclusive) scan earns its cost. It counts as
@@ -447,6 +543,25 @@ Panel {
             visible: root.lastError !== ""
             text: "! " + root.lastError
             color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          // What moved since the previous scan. Deliberately a single line and
+          // deliberately muted: it is context, not an alarm. It appears only
+          // when a check's STATUS changed -- never for a value that merely
+          // shifted, because uptime and latency move on every single scan and a
+          // line that always has something to say is noise.
+          Text {
+            width: parent.width
+            visible: root.changeLine !== ""
+            text: root.changeLine
+            // Urgent when something got worse, plain when something recovered.
+            // The summary does not carry the direction, so take it from the
+            // diff itself rather than guessing from the wording.
+            color: root.lastDiff && root.lastDiff.worse.length > 0
+              ? root.accent : Qt.darker(root.foreground, 1.3)
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap

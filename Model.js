@@ -130,6 +130,98 @@ function weight(status) {
 //
 // Worst-wins. A single problem check makes the whole scan a problem, because a
 // single unreadable thing is more actionable than an averaged score.
+// ------------------------------------------------------------- what changed
+//
+// diffScans(before, after) -> the HEALTH transitions between two scans.
+//
+// Why not diff the values? Because almost every value moves on every scan:
+// uptime ticks, latency jitters, memory drifts, pending-update counts shift.
+// Reporting those would mean a "what changed" line that always has something
+// in it, which is the same noise problem as a chatty notification.
+//
+// So only the STATUS of each check is compared, by id. A check that went from
+// healthy to broken, or broken to healthy, is news. A check whose reading moved
+// while its status held is not -- and that distinction is exactly what makes
+// this usable at a glance.
+//
+// Returns { changed: bool, worse: [], better: [], same: n }.
+//   worse  - ok/info -> attention/problem
+//   better - problem/attention -> ok/info
+//   same   - how many checks kept their status (including brand-new and removed
+//            ids, which are not transitions and are counted here)
+//
+// before/after may be anything parseDoctor accepts; a null or malformed side
+// yields changed:false, never a fabricated transition.
+function diffScans(before, after) {
+  var out = { changed: false, worse: [], better: [], same: 0 }
+  var b = (before && Array.isArray(before.checks)) ? before : null
+  var a = (after && Array.isArray(after.checks)) ? after : null
+  // With no baseline there is nothing to have changed FROM. That is the honest
+  // answer on the first scan, not "everything changed".
+  if (!b || !a) return out
+
+  var seen = {}
+  for (var i = 0; i < a.checks.length; i++) {
+    var now = a.checks[i]
+    var id = str(now.id)
+    seen[id] = true
+    var then = findCheck(b.checks, id)
+    if (!then) { out.same++; continue }
+    var beforeW = weight(then.status)
+    var afterW = weight(now.status)
+    if (beforeW === afterW) { out.same++; continue }
+    var entry = {
+      id: id,
+      category: str(now.category) || str(then.category) || "system",
+      title: str(now.title) || str(then.title),
+      from: normStatus(then.status),
+      to: normStatus(now.status),
+      // The current reading is what the user needs to see; the old one is
+      // usually noise ("4 problems" -> "3 problems").
+      value: str(now.value)
+    }
+    if (afterW > beforeW) out.worse.push(entry)
+    else out.better.push(entry)
+  }
+
+  // A check that existed before and is gone now is not a transition -- it is a
+  // check that stopped running (a section failed, or a tool vanished). Count it
+  // as unchanged so a section going silent is never reported as "fixed".
+  for (var j = 0; j < b.checks.length; j++) {
+    if (!seen[str(b.checks[j].id)]) out.same++
+  }
+
+  // Worst-first within each group, so the panel can render straight through.
+  out.worse.sort(function (x, y) {
+    return weight(y.to) - weight(x.to) || String(x.category).localeCompare(String(y.category))
+  })
+  out.better.sort(function (x, y) {
+    return weight(x.to) - weight(y.to) || String(x.category).localeCompare(String(y.category))
+  })
+  out.changed = out.worse.length > 0 || out.better.length > 0
+  return out
+}
+
+// changeSummary(diff) -> one line describing what changed, or null.
+//
+// The "what changed?" feature reduced to a sentence, so it can sit under the
+// panel header or in the report without the reader having to parse structure.
+function changeSummary(diff) {
+  if (!diff || !diff.changed) return null
+  var parts = []
+  if (diff.worse.length > 0) {
+    parts.push(diff.worse.length === 1
+      ? "1 new issue (" + str(diff.worse[0].title) + ")"
+      : diff.worse.length + " new issues")
+  }
+  if (diff.better.length > 0) {
+    parts.push(diff.better.length === 1
+      ? "1 issue resolved"
+      : diff.better.length + " issues resolved")
+  }
+  return parts.join(", ") + " since the last scan"
+}
+
 function overallState(checks) {
   if (!Array.isArray(checks) || checks.length === 0) return "ok"
   var worst = 0

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "davedes.omadoctor",
   "name": "OmaDoctor",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": "Davedes83",
   "description": "Diagnose common Omarchy system problems. Runs read-only health checks across system, network, audio and storage, explains what each finding means, and produces a redacted diagnostic report you can paste into a bug report or support channel.",
   "kinds": ["bar-widget"],
