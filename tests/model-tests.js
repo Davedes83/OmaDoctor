@@ -20,7 +20,8 @@ const EXPORTS = [
   "parseDoctor", "overallState", "issues", "counts", "byCategory",
   "findCheck", "weight", "normStatus", "fmtAge", "glyph", "stateLabel", "redact", "buildReport",
   "buildReportText", "findingRows", "strArray", "normRepair",
-  "shouldNotify", "notificationText", "diffScans", "changeSummary"
+  "shouldNotify", "notificationText", "diffScans", "changeSummary",
+  "summaryLine", "breakdownLine"
 ];
 
 const ctx = vm.createContext({ JSON, Math, String, Number, Array, Object, isFinite, Date });
@@ -748,6 +749,57 @@ if (legacyFindings.indexOf("Repairs are listed") === -1) {
 } else {
   fail("no repair disclaimer when nothing suggests a repair", legacyFindings);
 }
+
+// ------------------------------------------------- summaryLine / breakdownLine
+
+// The panel's all-clear copy is generated from these, so they must reflect the
+// real tally and never invent a reassuring number.
+
+eq("summaryLine is empty for an empty scan", "",
+  M.summaryLine(M.counts([])));
+eq("summaryLine singular for one passing check", "1 check passed",
+  M.summaryLine(M.counts([{ status: "ok" }])));
+eq("summaryLine plural for many passing checks", "34 checks passed",
+  M.summaryLine(M.counts(Array(34).fill({ status: "ok" }))));
+eq("summaryLine counts info as healthy when nothing needs review",
+  "3 checks passed",
+  M.summaryLine(M.counts([
+    { status: "ok" }, { status: "info" }, { status: "info" }
+  ])));
+eq("summaryLine names the review count when something needs attention",
+  "3 of 5 checks fine, 2 to review",
+  M.summaryLine(M.counts([
+    { status: "ok" }, { status: "ok" }, { status: "ok" },
+    { status: "attention" }, { status: "problem" }
+  ])));
+
+// Accepts a raw check list directly, so a caller cannot silently hand it the
+// wrong shape and get a believable "0 checks" line.
+eq("summaryLine accepts a raw check list", "2 checks passed",
+  M.summaryLine([{ status: "ok" }, { status: "ok" }]));
+
+// A malformed argument must degrade to the empty scan, never to a fabricated
+// pass. This is the "unknown must never read as healthy" rule.
+eq("summaryLine rejects a malformed argument", "",
+  M.summaryLine({ ok: "lots" }));
+eq("summaryLine rejects null", "", M.summaryLine(null));
+
+eq("breakdownLine is empty for an empty scan", "",
+  M.breakdownLine(M.counts([])));
+eq("breakdownLine lists only non-zero buckets", "34 ok  ·  2 info",
+  M.breakdownLine(M.counts([
+    ...Array(34).fill({ status: "ok" }),
+    { status: "info" }, { status: "info" }
+  ])));
+eq("breakdownLine keeps a fixed bucket order regardless of input order",
+  "1 ok  ·  1 attention  ·  1 problem",
+  M.breakdownLine(M.counts([
+    { status: "problem" }, { status: "ok" }, { status: "attention" }
+  ])));
+eq("breakdownLine accepts a raw check list", "1 problem",
+  M.breakdownLine([{ status: "problem" }]));
+eq("breakdownLine rejects a malformed argument", "",
+  M.breakdownLine({ ok: {} }));
 
 // ------------------------------------------------------------------- summary
 

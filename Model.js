@@ -330,6 +330,65 @@ function counts(checks) {
   return c
 }
 
+// summaryLine(counts) -> the headline for a scan that has nothing to report.
+//
+// Deliberately not a score. A "34/34" style ratio reads as a grade and implies
+// that 33/34 would be a failure, which is a different claim from "nothing here
+// needs attention". This says exactly what is true: how many checks ran, and how
+// many of them are fine. Returns "" when there is nothing to say, so a caller
+// can bind it straight to a Text and let an empty string hide the row.
+//
+// Accepts either a counts() object or a raw check list, so it cannot be handed
+// something it silently misreads: a list is counted first.
+function summaryLine(countsOrChecks) {
+  var c = asCounts(countsOrChecks)
+  if (c.total === 0) return ""
+  var healthy = c.ok + c.info
+  if (c.attention === 0 && c.problem === 0) {
+    return c.total + (c.total === 1 ? " check passed" : " checks passed")
+  }
+  // Something needs review: name the clean part and the rest, rather than
+  // rounding the whole scan up to a number that looks like a grade.
+  return healthy + " of " + c.total + " checks fine, " +
+    (c.attention + c.problem) + " to review"
+}
+
+// breakdownLine(counts) -> a compact "ok 34 · info 2 · attention 1" style summary.
+//
+// Only non-zero buckets appear, so a healthy machine gets one short clause
+// instead of a row of zeroes. Returns "" for an empty scan. Bucket order is
+// fixed (ok, info, attention, problem) so the line does not reshuffle between
+// scans as counts move.
+function breakdownLine(countsOrChecks) {
+  var c = asCounts(countsOrChecks)
+  if (c.total === 0) return ""
+  var parts = []
+  var order = ["ok", "info", "attention", "problem"]
+  for (var i = 0; i < order.length; i++) {
+    var n = c[order[i]]
+    if (n > 0) parts.push(n + " " + order[i])
+  }
+  return parts.join("  ·  ")
+}
+
+// asCounts(v) -> a counts() object, whether handed one or a list of checks.
+//
+// Keeping this coercion in one place means summaryLine/breakdownLine cannot be
+// called with the wrong shape by accident -- the failure mode of a helper that
+// assumes its argument is already aggregated is a silent "0 checks" that looks
+// like a real empty scan.
+function asCounts(v) {
+  if (Array.isArray(v)) return counts(v)
+  if (!v || typeof v !== "object") return counts([])
+  var c = counts([])
+  c.ok = num(v.ok)
+  c.info = num(v.info)
+  c.attention = num(v.attention)
+  c.problem = num(v.problem)
+  c.total = num(v.total)
+  return c
+}
+
 // byCategory(checks) -> ordered array of { category, checks, state }
 // Categories keep a stable order so the panel does not reshuffle between scans.
 function byCategory(checks) {

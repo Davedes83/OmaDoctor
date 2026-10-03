@@ -51,6 +51,19 @@ Panel {
     return n
   }
 
+  // The id of the finding row the pointer is over, or "" for none.
+  //
+  // Deliberately NOT part of the keyboard cursor model: rowCount stays 2, so
+  // the arrow keys still walk only the two action buttons and Enter activates
+  // them. Findings are hover-highlighted only, which is the whole premium win
+  // without turning every finding into a tab stop.
+  //
+  // A single id (rather than a per-row flag) is what guarantees the kit's "one
+  // highlight at a time" contract -- two rows can never claim the cursor.
+  // Cleared on every scan and on close so an id from a finished scan can never
+  // light up a row that no longer exists.
+  property string hoveredCheckId: ""
+
   // A background quick scan is local-only and cheap, so the bar stays current
   // without the panel ever being opened.
   readonly property int pollMs: 30000
@@ -97,6 +110,11 @@ Panel {
 
   function refresh(mode, userInitiated) {
     var requested = mode || "quick"
+    // The row under the pointer is about to be replaced by a fresh scan, so the
+    // highlight must not survive into the new one. Cleared here rather than on
+    // completion because the pointer may well still be sitting over the panel
+    // when the scan lands, and a stale id would light an unrelated row.
+    hoveredCheckId = ""
     if (scanProc.running) {
       // A scan is already in flight. Opening the panel during a quick scan must
       // still end up with the network section, so remember the upgrade and
@@ -426,6 +444,10 @@ Panel {
       cursorActive = false
       selectedIndex = -1
       refresh("full", true)
+    } else {
+      // Closing hands the pointer back to the desktop; without this a row would
+      // stay lit the whole time the panel is shut.
+      hoveredCheckId = ""
     }
   }
 
@@ -570,33 +592,59 @@ Panel {
           PanelSeparator { width: parent.width; foreground: root.foreground }
 
           // ------------------------------------------------- action buttons
+          // Labelled Buttons rather than icon-only PanelActionButtons. Two
+          // bare icons read as utilitarian; naming the two actions is what makes
+          // them obvious without a tooltip round-trip.
+          //
+          // Emphasis is a LOW-ALPHA accent tint, never a solid accent fill:
+          // Button paints its own label in `foreground`, and this theme has
+          // accent == foreground, so a solid accent fill would render the label
+          // invisible (light text on light background). The tint separates the
+          // primary without fighting the label.
           Row {
             spacing: Style.spacing.sm
             width: parent.width
 
-            PanelActionButton {
+            Button {
               id: fullButton
               iconText: "󰃬"
+              text: "Run full diagnosis"
               tooltipText: "Run full diagnosis (includes network)"
               foreground: root.foreground
+              accent: root.accent
+              background: Util.alpha(root.accent, 0.10)
+              bordered: true
               hasCursor: root.cursorActive && root.selectedIndex === 0
-              size: Style.spacing.controlHeight
+              fontSize: Style.font.bodySmall
+              horizontalPadding: Style.spacing.controlPaddingX - Style.space(2)
+              verticalPadding: Style.spacing.controlPaddingY - Style.space(1)
               onClicked: root.refresh("full", true)
             }
 
-            PanelActionButton {
+            Button {
+              id: copyButton
               iconText: "󰅏"
+              text: "Copy report"
               tooltipText: "Copy redacted report"
               foreground: root.foreground
-              hasCursor: root.cursorActive && root.selectedIndex === 1
+              accent: root.accent
+              bordered: true
               enabled: root.ready
-              size: Style.spacing.controlHeight
+              hasCursor: root.cursorActive && root.selectedIndex === 1
+              fontSize: Style.font.bodySmall
+              horizontalPadding: Style.spacing.controlPaddingX - Style.space(2)
+              verticalPadding: Style.spacing.controlPaddingY - Style.space(1)
               onClicked: root.copyReport()
             }
 
+            // Fill whatever horizontal space the two labelled buttons leave,
+            // whatever their theme-driven widths turn out to be. The old fixed
+            // subtraction (two 22px icon buttons) would now overflow the Row.
             Text {
               anchors.verticalCenter: parent.verticalCenter
-              width: Math.max(0, parent.width - Style.space(22) * 2 - Style.spacing.sm * 2)
+              width: Math.max(0, parent.width
+                     - fullButton.width - copyButton.width
+                     - Style.spacing.sm * 2)
               text: root.scanning
                 ? "scanning..."
                 : (root.ready ? "last checked " + Model.fmtAge(Number(root.scan.ts || 0), root.nowSec) : "")
@@ -613,11 +661,62 @@ Panel {
           // Grouped by category, and only categories with something to
           // report. A wall of passing checks buries the finding; the copied
           // report still carries the full picture.
-          Text {
+
+          // The all-clear state. When nothing needs review this is the WHOLE
+          // panel body, so a lone muted sentence left it looking unfinished
+          // rather than calm. Instead: a large state glyph, a bold headline
+          // drawn from the actual counts, and the per-bucket breakdown -- so
+          // the healthy case reads as a composed result, not an absence.
+          //
+          // Wording comes from Model.summaryLine/breakdownLine rather than being
+          // hardcoded, so it can never disagree with the scan it describes.
+          Column {
             width: parent.width
             visible: root.ready && root.rows.length === 0
-            text: root.ready ? "Nothing needs attention." : "No scan data yet."
-            color: root.ready ? root.foreground : Qt.darker(root.foreground, 1.4)
+            // Breathing room above and below: this block is centred in what is
+            // left of the panel, not crammed under the separator.
+            topPadding: Style.spacing.huge
+            bottomPadding: Style.spacing.huge
+            spacing: Style.spacing.sm
+
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              text: Model.glyph("ok")
+              color: root.stateColor
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.displayLarge
+            }
+
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              text: Model.summaryLine(root.totals)
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+              elide: Text.ElideRight
+            }
+
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              visible: Model.breakdownLine(root.totals) !== ""
+              text: Model.breakdownLine(root.totals)
+              color: Qt.darker(root.foreground, 1.35)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+          }
+
+          // Pre-first-scan placeholder, before there is any tally to compose.
+          Text {
+            width: parent.width
+            visible: !root.ready
+            text: "No scan data yet."
+            color: Qt.darker(root.foreground, 1.4)
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
           }
@@ -644,71 +743,139 @@ Panel {
                 text: modelData.kind === "header" ? String(modelData.category) : ""
               }
 
-              Row {
+              // The check row is a real CursorSurface so it highlights on hover
+              // with the kit's own fill and border. Everything inside it is the
+              // previous content, unchanged -- only the wrapper is new.
+              FindingRow {
                 width: parent.width
                 visible: modelData.kind === "check"
-                spacing: Style.spacing.sm
-
-                Text {
-                  width: Style.space(18)
-                  text: modelData.kind === "check" ? Model.glyph(modelData.check.status) : ""
-                  color: modelData.kind !== "check" ? root.foreground
-                       : (modelData.check.status === "problem" ? root.urgent
-                       : (modelData.check.status === "attention" ? root.accent : root.foreground))
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.icon
-                }
-
-                Column {
-                  width: parent.width - Style.space(18) - Style.spacing.sm
-                  spacing: 1
-
-                  Text {
-                    width: parent.width
-                    visible: modelData.kind === "check"
-                    text: modelData.kind === "check" ? modelData.check.title : ""
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
-                    font.bold: modelData.kind === "check" && modelData.check.status === "problem"
-                    elide: Text.ElideRight
-                  }
-
-                  Text {
-                    width: parent.width
-                    visible: modelData.kind === "check" && modelData.check.value !== ""
-                    text: modelData.kind === "check" ? modelData.check.value : ""
-                    color: Qt.darker(root.foreground, 1.25)
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    elide: Text.ElideRight
-                  }
-
-                  // Evidence and the suggested fix are the reason the panel
-                  // exists, so both are always shown for a finding.
-                  Text {
-                    width: parent.width
-                    visible: modelData.kind === "check" && modelData.check.detail !== ""
-                    text: modelData.kind === "check" ? modelData.check.detail : ""
-                    color: Qt.darker(root.foreground, 1.5)
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    wrapMode: Text.WordWrap
-                  }
-
-                  Text {
-                    width: parent.width
-                    visible: modelData.kind === "check" && modelData.check.suggestion !== ""
-                    text: modelData.kind === "check" ? "-> " + modelData.check.suggestion : ""
-                    color: root.accent
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    wrapMode: Text.WordWrap
-                  }
-                }
+                rowData: modelData
               }
             }
           }
+        }
+      }
+    }
+  }
+
+  // ------------------------------------------------ reusable inline component
+
+  // One finding row: a hover-highlighted CursorSurface wrapping the check's
+  // glyph, title, value, evidence and suggested fix.
+  //
+  // An inline component (like SinkRow/SourceRow in the first-party audio panel)
+  // rather than a nested Repeater delegate, so it can be reasoned about as one
+  // unit and reused if the layout changes. It must NOT read containsMouse for
+  // its own fill or border -- the MouseArea below only writes the root's
+  // hoveredCheckId, and hasCursor is the single source of truth, which is what
+  // keeps exactly one row highlighted at a time.
+  component FindingRow: CursorSurface {
+    id: findingRow
+
+    // The flat findingRows entry: { kind: "header" | "check", check }.
+    required property var rowData
+
+    // Header entries have no `check`. Every access below goes through these two
+    // guards rather than testing rowData.check directly, because QML evaluates
+    // bindings on invisible items too -- reading rowData.check.id unguarded
+    // would throw "Cannot read property of undefined" for header rows.
+    readonly property bool isCheck: !!rowData && rowData.kind === "check"
+    readonly property var check: isCheck ? rowData.check : null
+    readonly property string checkId: check ? String(check.id) : ""
+
+    hasCursor: checkId !== "" && root.hoveredCheckId === checkId
+
+    foreground: root.foreground
+    accent: root.stateColor
+    // Tint the hover with the row's own state so a problem row reads hotter on
+    // hover than an attention row, matching the glyph. CursorSurface already
+    // paints the hover-cursor border off hasCursor, so borderSpec is left to it.
+    fill: Style.hoverFillFor(root.foreground, root.stateColor)
+    currentFill: Style.selectedFillFor(root.foreground, root.stateColor)
+    radius: Style.cornerRadius
+
+    implicitHeight: findingInner.implicitHeight + Style.spacing.xl
+
+    Row {
+      id: findingInner
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(6)
+      anchors.rightMargin: Style.space(6)
+      spacing: Style.spacing.sm
+
+      Text {
+        width: Style.space(18)
+        text: findingRow.isCheck ? Model.glyph(findingRow.check.status) : ""
+        color: !findingRow.isCheck ? root.foreground
+             : (findingRow.check.status === "problem" ? root.urgent
+             : (findingRow.check.status === "attention" ? root.accent : root.foreground))
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.icon
+      }
+
+      Column {
+        width: parent.width - Style.space(18) - Style.spacing.sm
+        spacing: 1
+
+        Text {
+          width: parent.width
+          visible: findingRow.isCheck
+          text: findingRow.isCheck ? findingRow.check.title : ""
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          font.bold: findingRow.isCheck && findingRow.check.status === "problem"
+          elide: Text.ElideRight
+        }
+
+        Text {
+          width: parent.width
+          visible: findingRow.isCheck && findingRow.check.value !== ""
+          text: findingRow.isCheck ? findingRow.check.value : ""
+          color: Qt.darker(root.foreground, 1.25)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          elide: Text.ElideRight
+        }
+
+        // Evidence and the suggested fix are the reason the panel exists, so
+        // both are always shown for a finding.
+        Text {
+          width: parent.width
+          visible: findingRow.isCheck && findingRow.check.detail !== ""
+          text: findingRow.isCheck ? findingRow.check.detail : ""
+          color: Qt.darker(root.foreground, 1.5)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+        }
+
+        Text {
+          width: parent.width
+          visible: findingRow.isCheck && findingRow.check.suggestion !== ""
+          text: findingRow.isCheck ? "-> " + findingRow.check.suggestion : ""
+          color: root.accent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+        }
+      }
+    }
+
+    // The ONLY writer of root.hoveredCheckId. Hover in, highlight; hover out,
+    // clear -- but only clear if this row still owns the highlight, so moving
+    // between two rows does not flicker.
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.NoButton
+      onContainsMouseChanged: {
+        if (containsMouse) {
+          root.hoveredCheckId = findingRow.checkId
+        } else if (root.hoveredCheckId === findingRow.checkId) {
+          root.hoveredCheckId = ""
         }
       }
     }
