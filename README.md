@@ -87,6 +87,13 @@ parsing, roll-up, redaction and report rendering, and `Panel.qml` only spawns
 the scanner and draws the result. `Model.js` is a QML `.pragma library` with no
 QML dependency, so the interesting logic is testable headlessly under `node`.
 
+Parsing third-party tool output is kept as pure functions so it can be pinned
+with fixtures instead of only being observed on one live machine — see
+`backend/wpctl-parse.sh` and `tests/wpctl-tests.sh`. A command that answers an
+unknown subcommand with a usage banner, or an error message that happens to
+contain digits, must never be scraped for a reading; the audio checks are the
+worked example of a check that once displayed "Usage:" as a healthy device.
+
 Every helper is spawned through a hard deadline:
 
 ```
