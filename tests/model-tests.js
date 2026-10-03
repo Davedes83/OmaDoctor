@@ -20,7 +20,7 @@ const EXPORTS = [
   "parseDoctor", "overallState", "issues", "counts", "byCategory",
   "findCheck", "weight", "normStatus", "fmtAge", "glyph", "stateLabel", "redact", "buildReport",
   "buildReportText", "findingRows", "strArray", "normRepair",
-  "shouldNotify", "notificationText", "diffScans", "changeSummary",
+  "shouldNotify", "notificationText", "diffScans", "changeSummary", "redactGaps",
   "summaryLine", "breakdownLine"
 ];
 
@@ -50,6 +50,26 @@ function fail(name, detail) {
 function eq(name, expected, actual) {
   if (JSON.stringify(expected) === JSON.stringify(actual)) ok(name);
   else fail(name, `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+}
+
+// eqThrows(name, fn) -> passes when fn does NOT throw.
+//
+// Every exported function is reachable from Panel.qml with no try/catch of its
+// own, so "returns something" and "does not throw" are different claims and the
+// second one is the one that matters. A crash inside a QML event handler is
+// logged by the shell and otherwise invisible: the CLI shows nothing and
+// journalctl --user is the only place it appears.
+function eqThrows(name, fn) {
+  let threw = false;
+  let detail = "";
+  try {
+    fn();
+  } catch (e) {
+    threw = true;
+    detail = (e && e.message) ? e.message : String(e);
+  }
+  if (threw) fail(name, `threw: ${detail}`);
+  else ok(name);
 }
 
 // --------------------------------------------------------------- parseDoctor
@@ -94,8 +114,27 @@ eq("overallState: info alone is still ok", "ok", M.overallState([{ status: "ok" 
 eq("overallState: one attention", "attention", M.overallState([{ status: "ok" }, { status: "attention" }]));
 eq("overallState: one problem wins", "problem", M.overallState([{ status: "attention" }, { status: "problem" }]));
 eq("overallState: worst wins regardless of order", "problem", M.overallState([{ status: "problem" }, { status: "ok" }]));
-eq("overallState: empty is ok", "ok", M.overallState([]));
-eq("overallState: null is ok", "ok", M.overallState(null));
+// An EMPTY scan is not a healthy machine. It means nothing was inspected, and
+// at this layer that is indistinguishable from "nothing is wrong" -- which made
+// the panel read HEALTHY, suppressed the notification, and produced a report
+// saying "Nothing needs attention" for a scan that had checked nothing.
+// doctor.sh states the opposite invariant: a missing check must never be
+// mistaken for a healthy one.
+eq("overallState: empty is problem, not ok", "problem", M.overallState([]));
+eq("overallState: null is problem, not ok", "problem", M.overallState(null));
+// Every element unusable is the same situation as no elements at all.
+eq("overallState: all-null list is problem", "problem", M.overallState([null, null]));
+eq("overallState: non-objects are not counted", "ok",
+  M.overallState([{ status: "ok" }, null, 7, "x"]));
+// A null element must not throw in any exported aggregation helper. These were
+// reachable from Panel.qml's hot path.
+eq("counts survives a null element", { ok: 0, info: 0, attention: 0, problem: 0, total: 0 },
+  M.counts([null]));
+eq("issues survives a null element", 0, M.issues([null]).length);
+eq("findingRows survives a null element", 0, M.findingRows([null]).length);
+eq("notificationText survives a null element", null,
+  M.notificationText({ checks: [null] }));
+eq("byCategory survives a null element", 0, M.byCategory([null]).length);
 
 eq("counts tallies each state", { ok: 2, info: 1, attention: 1, problem: 1, total: 5 },
   M.counts([
@@ -157,32 +196,207 @@ eq("redact keeps load-average slashes", "2.42 / 1.73 / 1.72",
 eq("redact keeps a dated timestamp intact", "2026-10-03 08:04:18 UTC",
   M.redact("2026-10-03 08:04:18 UTC", {}));
 
-// A 4+ group address with no "::" is still a real address and must be masked,
-// so the guard above cannot be satisfied by simply dropping the pattern.
+// An uncompressed IPv6 address is ALWAYS exactly 8 groups, and every compressed
+// form contains "::". So "8 groups OR contains ::" is a complete and safe test,
+// and it is the one the redactor uses.
+//
+// The previous rule was "4+ groups, or any group that is not a bare 1-2 digit
+// decimal". That is what destroyed file:line:col: Omarchy's Hyprland config is
+// hyprland.lua, so `hyprctl configerrors` yields
+// "hyprland.lua:42:12: unknown keyword" and the report -- whose own advice is
+// "open the file and line named in each error" -- printed "hyprland.lu<ipv6>".
+// "a:42:12" passes the old heuristic because "a" is not a short decimal.
 eq("redact masks uncompressed 8-group IPv6", "<ipv6>",
   M.redact("fe80:0:0:0:0:0:0:1", {}));
-eq("redact masks a group that is not short-decimal", "<ipv6>",
-  M.redact("abcd:ef01:2345", {}));
 eq("redact masks the all-zero shorthand", "<ipv6>", M.redact("::", {}));
 eq("redact masks fe80 with empty tail", "<ipv6>", M.redact("fe80::", {}));
 
-// The original IP must not survive anywhere in a redacted report.
+// file:line:col is not an address and must survive verbatim.
+eq("redact keeps hyprland.lua:42:12", "hyprland.lua:42:12: unknown keyword",
+  M.redact("hyprland.lua:42:12: unknown keyword", {}));
+eq("redact keeps waybar.css:12:4", "waybar.css:12:4: invalid",
+  M.redact("waybar.css:12:4: invalid", {}));
+eq("redact keeps keybinds.conf:88:3", "keybinds.conf:88:3: exec",
+  M.redact("keybinds.conf:88:3: exec", {}));
+eq("redact keeps readme.md:1:1", "readme.md:1:1", M.redact("readme.md:1:1", {}));
+// A 3-group run is never an address under the corrected rule.
+eq("redact keeps a 3-group non-decimal run", "abcd:ef01:2345",
+  M.redact("abcd:ef01:2345", {}));
+
+// An IPv6 address carrying an embedded IPv4 tail, with and without a real
+// prefix. Only the leading "::" forms were handled before; a prefixed address
+// had its FIRST octet swallowed by the hex-group pattern and leaked the other
+// three.
+eq("redact masks IPv4-mapped ::ffff:1.2.3.4", "<ipv6>",
+  M.redact("::ffff:192.168.1.5", {}));
+eq("redact masks IPv4-compatible ::1.2.3.4", "<ipv6>",
+  M.redact("::1.2.3.4", {}));
+eq("redact masks a prefixed address with an IPv4 tail", "inet6 <ipv6>/64",
+  M.redact("inet6 2001:db8::192.168.1.5/64", {}));
+eq("redact masks a ULA with an IPv4 tail", "addr <ipv6>",
+  M.redact("addr fd00::10.0.0.37", {}));
+eq("redact masks 6to4", "<ipv6>", M.redact("2002:c0a8:101::1", {}));
+// A zone suffix identifies the interface as surely as the address identifies
+// the host, so it goes with the address.
+eq("redact masks an IPv6 zone suffix", "<ipv6>",
+  M.redact("fe80::1%wlp3s0", {}));
+
+// MAC conventions beyond colon and dash: ip/udev print the Cisco form, sysfs
+// exposes a bare 12-hex perm_address, and config files use underscores.
+eq("redact masks a Cisco MAC", "<mac>", M.redact("aabb.ccdd.eeff", {}));
+eq("redact masks a dotted-octet MAC", "<mac>", M.redact("aa.bb.cc.dd.ee.ff", {}));
+eq("redact masks an underscore MAC", "<mac>", M.redact("aa_bb_cc_dd_ee_ff", {}));
+eq("redact masks a bare 12-hex MAC", "<mac>", M.redact("3cf0c917b2ac", {}));
+
+// Storage identifiers: a filesystem UUID or a volume serial is a stable
+// hardware fingerprint, and a typical Omarchy box has two mounted data volumes
+// named by exactly these.
+eq("redact masks a filesystem UUID", "uuid <uuid>",
+  M.redact("uuid 550e8400-e29b-41d4-a716-446655440000", {}));
+eq("redact masks a /mnt volume path", "/mnt/<volume>",
+  M.redact("/mnt/c30f4f52-994d-4076-b4cd-5edb0d09e6ef", {}));
+eq("redact masks an NTFS volume serial", "/mnt/<volume>",
+  M.redact("/mnt/D62476C62476A8DF", {}));
+eq("redact masks a labelled disk serial", "serial: <serial>",
+  M.redact("serial: S6B2NJ0T902341", {}));
+eq("redact masks a disk serial with no punctuation after the label", "serial <serial>",
+  M.redact("serial S6B2NJ0T902341", {}));
+eq("redact masks a udev-style disk serial", "SERIAL=<serial>",
+  M.redact("SERIAL=S6B2NJ0T902341", {}));
+eq("redact leaves the word serial in prose alone", "the serial number is not shown",
+  M.redact("the serial number is not shown", {}));
+eq("redact masks /root like home", "~/.bash_history",
+  M.redact("/root/.bash_history", {}));
+
+// Network names. The SSID is the user's home network; a PCI-derived interface
+// name discloses the DMI product string.
+eq("redact masks an SSID", 'SSID: <ssid>', M.redact('SSID: "Dave 5G"', {}));
+eq("redact masks an interface named after dev", "192.168.x.x dev <iface>",
+  M.redact("192.168.x.x dev wlp3s0", {}));
+eq("redact masks a PCI interface name", "<iface> is down",
+  M.redact("eno1 is down", {}));
+eq("redact masks a wlp interface name", "<iface> is up",
+  M.redact("wlp3s0 is up", {}));
+
+// OmaDoctor's default hostname is literally "omarchy" and the DNS evidence
+// quotes the public site "omarchy.org". Masking a dotted token as if it were
+// the local machine destroyed a fact about a website in order to redact a fact
+// about the host, leaving the report unable to say which lookup failed.
+eq("redact masks a bare hostname", "host <host> here",
+  M.redact("host omarchy here", { hostname: "omarchy" }));
+eq("redact keeps a public domain name", "could not resolve omarchy.org",
+  M.redact("could not resolve omarchy.org", { hostname: "omarchy" }));
+
+// o.home was dead in production: the /home/<user> rule rewrote the string first,
+// so the home substitution never matched. Panel.qml always passes both.
+eq("redact applies home before username", "~/x",
+  M.redact("/home/davedes/x", { username: "davedes", home: "/home/davedes" }));
+
+// A one- or two-character username must not rewrite unrelated prose. An
+// unconditional split/join turned "Devices detected" into
+// "Devices <user>etecte<user>" for username "d".
+eq("redact does not mangle prose for a short username",
+  "Devices detected: 2, dBus ok",
+  M.redact("Devices detected: 2, dBus ok", { username: "d" }));
+eq("redact still masks a normal username", "owned by <user>",
+  M.redact("owned by davedes", { username: "davedes" }));
+
+// A silent redaction rule is worse than no rule: the reader cannot tell
+// "nothing identifying was found" from "redaction was off for this field".
+// Panel.qml passes Quickshell.env("HOSTNAME"), which is a bash variable rather
+// than an exported one on many systems, so it arrives empty and the hostname
+// was never actually redacted while the report claimed it was.
+eq("redactGaps reports every missing input", "hostname,username,home directory",
+  M.redactGaps({}).join(","));
+eq("redactGaps is empty when all inputs are present", "",
+  M.redactGaps({ hostname: "mybox", username: "dave", home: "/home/dave" }).join(","));
+eq("redactGaps flags only the hostname when it is missing", "hostname",
+  M.redactGaps({ username: "dave", home: "/home/dave" }).join(","));
+
+// The end-to-end leak test. This fixture DELIBERATELY embeds every class of
+// identifier the redactor claims to handle, in every field the report renders.
+//
+// The previous version of this test built its needle list from
+// ["192.168.10.1","mybox","dave","aa:bb:cc:dd:ee:ff"] and asserted none of them
+// appeared in a report generated from a fixture whose values were "Omarchy",
+// "85% used", "unreachable", "free" and "check cable". None of the four needles
+// was ever in the document, so it passed unconditionally: deleting the MAC
+// colon rule, the MAC dash rule and the entire IPv4 rule from Model.js still
+// left it green. Its job is to catch exactly that, so it now has something to
+// catch.
+//
+// Redaction is applied to the fully assembled report text, so this also proves
+// there is no per-field gap -- details[] and repair.label/repair.detail are
+// rendered through the same pass.
+const leakScan = {
+  mode: "full",
+  version: "0.5.0",
+  ts: 1700000000,
+  sections: "network,storage,hyprland,audio",
+  checks: [
+    { id: "network.internet", category: "network", title: "Internet",
+      status: "problem", severity: 3, value: "unreachable",
+      detail: "gateway 192.168.10.1 did not answer; host mybox, user dave",
+      suggestion: "check the cable on wlp3s0" },
+    { id: "network.dns", category: "network", title: "DNS",
+      status: "attention", severity: 1, value: "slow",
+      detail: "resolver 192.168.10.1",
+      details: ["aa:bb:cc:dd:ee:ff responded", "aabb.ccdd.eeff is the NIC",
+                "fe80::1%wlp3s0 is the link-local", "2001:db8::192.168.10.1 mapped",
+                "SSID: \"Dave 5G\"", "eno1 is down"],
+      suggestion: "compare against 1.1.1.1" },
+    { id: "storage.mount", category: "storage", title: "Data volume",
+      status: "attention", severity: 1, value: "82% used",
+      detail: "/mnt/D62476C62476A8DF and /home/dave/.config",
+      repair: { tier: "caution", label: "free space on mybox (/mnt/c30f4f52-994d-4076-b4cd-5edb0d09e6ef)",
+                detail: "owned by dave; serial S6B2NJ0T902341" } },
+    { id: "hyprland.config_errors", category: "hyprland", title: "Configuration",
+      status: "problem", severity: 3, value: "1 error(s)",
+      detail: "Hyprland reported 1 configuration error(s)",
+      details: ["/home/dave/.config/hypr/hyprland.lua:42:12: unknown keyword \"execd\""],
+      suggestion: "Open the file and line named in each error below" },
+    { id: "audio.output", category: "audio", title: "Output",
+      status: "ok", severity: 0, value: "Beyerdynamic DT 770 Pro (80 Ω)",
+      detail: "sink 58 on mybox" }
+  ]
+};
+const leakReport = M.buildReport(leakScan, {
+  now: 1700000100,
+  redactInfo: { hostname: "mybox", username: "dave", home: "/home/dave" }
+});
+{
+  // Every one of these is an identifier that MUST NOT survive.
+  const leaks = [
+    "192.168.10.1", "mybox", "dave", "aa:bb:cc:dd:ee:ff", "aabb.ccdd.eeff",
+    "wlp3s0", "eno1", "Dave 5G", "D62476C62476A8DF", "c30f4f52-994d-4076-b4cd-5edb0d09e6ef",
+    "S6B2NJ0T902341", "/home/dave"
+  ]
+    .filter((needle) => leakReport.includes(needle));
+  if (leaks.length === 0) ok("report leaks no hostname/username/IP/MAC/SSID/interface/serial/UUID");
+  else fail("report leaks no hostname/username/IP/MAC/SSID/interface/serial/UUID",
+    "leaked: " + leaks.join(", "));
+}
+eq("redaction reaches details[] and repair", leakReport.includes("<mac>") && leakReport.includes("<iface>"), true);
+eq("redaction keeps the config error's file and line readable",
+  leakReport.includes("hyprland.lua:42:12"), true);
+eq("redaction keeps a non-ASCII device name intact",
+  leakReport.includes("Beyerdynamic DT 770 Pro (80 Ω)"), true);
+eq("redaction masks only the host part of an IPv4 address",
+  leakReport.includes("192.168.x.x"), true);
+
+// The old buildReport fixture, kept for the report-shape assertions below.
 const report = M.buildReport(goodScan ? parsed : null, {
   now: 1700000100,
   redactInfo: { hostname: "mybox", username: "dave", home: "/home/dave" }
 });
-checkNoLeak: {
-  const leaks = ["192.168.10.1", "mybox", "dave", "aa:bb:cc:dd:ee:ff"]
-    .filter((needle) => report.includes(needle));
-  if (leaks.length === 0) ok("report leaks no hostname/username/IP/MAC");
-  else fail("report leaks no hostname/username/IP/MAC", "leaked: " + leaks.join(", "));
-}
 
 // -------------------------------------------------------------------- report
 
-ok("report includes a headline state");
-if (report.includes("PROBLEM")) ok("report shows PROBLEM for a problem scan");
-else fail("report shows PROBLEM for a problem scan");
+// Was `ok("report includes a headline state");` on its own line, which
+// increments the counter and prints "ok" unconditionally -- before any
+// assertion ran. It passed whatever the report contained.
+eq("report includes a headline state", /RESULT: (HEALTHY|ATTENTION|PROBLEM)/.test(report), true);
+eq("report shows PROBLEM for a problem scan", report.includes("PROBLEM"), true);
 
 if (report.includes("FINDINGS")) ok("report includes a findings section");
 else fail("report includes a findings section");
@@ -800,6 +1014,118 @@ eq("breakdownLine accepts a raw check list", "1 problem",
   M.breakdownLine([{ status: "problem" }]));
 eq("breakdownLine rejects a malformed argument", "",
   M.breakdownLine({ ok: {} }));
+
+// ---------------------------------------------------- hostile input hardening
+//
+// Model.js is documented as guaranteeing that "a malformed scan must leave the
+// UI showing its last known good state". These pin the ways that guarantee was
+// false. Every case below threw before, on a path the panel reaches: the
+// document comes off stdout of a shell script, and Panel.qml calls these
+// functions from onStreamFinished with no try/catch of its own.
+
+// String(object) throws "Cannot convert object to primitive value" when the
+// object carries a non-callable own toString -- and JSON can express exactly
+// that, because it cannot express a function.
+eqThrows("parseDoctor survives an object-valued status",
+  () => M.parseDoctor('{"checks":[{"id":"a","status":{"toString":"ok"}}]}'));
+eqThrows("parseDoctor survives an object-valued value",
+  () => M.parseDoctor('{"checks":[{"id":"a","value":{"toString":"x"}}]}'));
+eqThrows("parseDoctor survives an object-valued category",
+  () => M.parseDoctor('{"checks":[{"id":"a","category":{"toString":1}}]}'));
+eqThrows("parseDoctor survives an object-valued mode",
+  () => M.parseDoctor('{"mode":{"toString":1},"checks":[]}'));
+
+// "[object Object]" in a diagnostic report is worse than an absent line. That
+// was strArray's policy; str() violated it for every other field.
+eq("parseDoctor drops an object-valued value rather than stringifying it", "",
+  M.parseDoctor('{"checks":[{"id":"a","value":{"toString":"x"}}]}').checks[0].value);
+eq("parseDoctor normalises a numeric value", "42",
+  M.parseDoctor('{"checks":[{"id":"a","value":42}]}').checks[0].value);
+eq("parseDoctor normalises a boolean value", "true",
+  M.parseDoctor('{"checks":[{"id":"a","value":true}]}').checks[0].value);
+
+// A bare {} inherits from Object.prototype, so for a category named "toString"
+// or "__proto__" a truthiness test finds an INHERITED value, the bucket is
+// never created, and the push below throws. byCategory is on the panel's hot
+// path, in notificationText and in buildReport.
+for (const k of ["__proto__", "toString", "constructor", "valueOf", "hasOwnProperty",
+                 "isPrototypeOf", "propertyIsEnumerable", "toLocaleString"]) {
+  eqThrows("byCategory survives the category name " + k,
+    () => M.byCategory([{ id: "a", category: k, title: "T", status: "problem" }]));
+}
+eq("byCategory buckets a prototype-named category",
+  M.byCategory([{ id: "a", category: "__proto__", title: "T", status: "problem" }]).length, 1);
+
+// buildReport is exported, and buildReportText is not the only way in.
+eqThrows("buildReport survives a check with no status",
+  () => M.buildReport({ mode: "quick", checks: [{ id: "a", category: "system", title: "T" }] }, {}));
+eqThrows("buildReport survives a repair that is a bare string",
+  () => M.buildReport({ mode: "quick", checks: [{ id: "a", status: "problem", title: "T", repair: "restart" }] }, {}));
+eq("buildReport never prints UNDEFINED for a non-object repair",
+  M.buildReport({ mode: "quick", checks: [{ id: "a", status: "problem", title: "T", repair: "restart" }] }, {}).includes("UNDEFINED"), false);
+// An unnormalised "OK" used to render as [FAIL] in the section body while the
+// FINDINGS section said "Nothing needs attention" -- a self-contradicting report.
+eq("buildReport is internally consistent for an uppercase status",
+  (() => {
+    const r = M.buildReport({ mode: "quick", checks: [{ id: "a", status: "OK", title: "T" }] }, {});
+    return (r.includes("[FAIL]") && r.includes("Nothing needs attention"));
+  })(), false);
+// new Date(1e21).toISOString() throws; a non-numeric value silently printed 1970,
+// which is a poor thing to show in a document whose purpose is temporal evidence.
+eqThrows("buildReport survives an out-of-range now",
+  () => M.buildReport({ mode: "quick", checks: [] }, { now: 1e21 }));
+eq("buildReport says unknown rather than 1970 for a junk now",
+  M.buildReport({ mode: "quick", checks: [] }, { now: "junk" }).split("\n")[3],
+  "Generated : unknown");
+
+// A producer can put a newline in a value -- hyprctl, journalctl and df all emit
+// multi-line output -- which let a check FORGE a line in a report designed to be
+// pasted to strangers.
+const forgedReport = M.buildReport({
+  mode: "full",
+  checks: [{
+    id: "a", category: "system", title: "T", status: "problem",
+    value: "line1\n  [ok] Fake check passed",
+    detail: "d\n     Evidence : forged"
+  }]
+}, { now: 1700000000 });
+eq("a value cannot forge a passing check row",
+  forgedReport.split("\n").some((l) => /^\s*\[ok\s*\]\s*Fake/.test(l)), false);
+eq("a detail cannot forge an evidence row",
+  forgedReport.split("\n").some((l) => /^\s*Evidence : forged/.test(l)), false);
+eq("the value is still shown, flattened onto one line",
+  forgedReport.includes("line1 [ok] Fake check passed"), true);
+
+// mode is printed as a factual claim about what the scan covered, so it is
+// validated rather than stringified.
+eq("an unrecognised mode is reported as quick", M.buildReport(
+  { mode: "Full", checks: [{ id: "a", status: "ok", title: "t" }] }, { now: 1700000000 }
+).includes("quick (local only)"), true);
+eq("a genuine full mode is reported as full", M.buildReport(
+  { mode: "full", checks: [{ id: "a", status: "ok", title: "t" }] }, { now: 1700000000 }
+).includes("full (includes network)"), true);
+
+// severity was parsed, round-tripped by a test as "a number", and read by
+// nothing. A documented, tested, inert field is worse than an absent one.
+eq("severity 3 outranks a healthy status", M.overallState([{ id: "a", status: "ok", severity: 3 }]), "problem");
+eq("severity 1 outranks a healthy status", M.overallState([{ id: "a", status: "ok", severity: 1 }]), "attention");
+eq("severity 0 does not outrank a problem status", M.overallState([{ id: "a", status: "problem", severity: 0 }]), "problem");
+eq("severity 0 leaves a healthy status alone", M.overallState([{ id: "a", status: "ok", severity: 0 }]), "ok");
+eq("issues honours severity", M.issues([{ id: "a", status: "ok", severity: 3 }]).length, 1);
+eq("counts still tracks status, not severity", M.counts([{ id: "a", status: "ok", severity: 3 }]).ok, 1);
+
+// A silent redaction rule is worse than no rule. The report must SAY when it
+// could not determine an identifier, instead of claiming redaction while the
+// hostname sits in plain text.
+eq("the report states an incomplete redaction",
+  M.buildReport({ mode: "quick", checks: [{ id: "a", status: "ok", title: "t" }] },
+    { now: 1700000000, redactInfo: {} }).includes("Redaction  : INCOMPLETE"), true);
+eq("the report states no gap when all inputs arrived",
+  M.buildReport({ mode: "quick", checks: [{ id: "a", status: "ok", title: "t" }] },
+    { now: 1700000000, redactInfo: { hostname: "mybox", username: "dave", home: "/home/dave" } })
+    .includes("INCOMPLETE"), false);
+eq("a one-character hostname counts as missing",
+  M.redactGaps({ hostname: "h", username: "dave", home: "/home/dave" }).join(","), "hostname");
 
 // ------------------------------------------------------------------- summary
 

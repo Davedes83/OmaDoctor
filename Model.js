@@ -25,27 +25,15 @@ function parseDoctor(text) {
   // Normalise every field so the UI never has to guard against missing data.
   var checks = []
   for (var i = 0; i < raw.checks.length; i++) {
-    var c = raw.checks[i]
-    if (!c || typeof c !== "object") continue
-    checks.push({
-      id: str(c.id),
-      category: str(c.category) || "system",
-      title: str(c.title),
-      status: normStatus(c.status),
-      severity: num(c.severity),
-      value: str(c.value),
-      detail: str(c.detail),
-      suggestion: str(c.suggestion),
-      // Both of these are OPTIONAL and purely additive: a check that does not
-      // carry them normalises to an empty list / null, so existing producers
-      // and renderers keep working untouched.
-      details: strArray(c.details),
-      repair: normRepair(c.repair)
-    })
+    checks.push(normCheck(raw.checks[i]))
   }
 
   return {
-    mode: str(raw.mode) || "quick",
+    // mode is validated, not merely stringified. The report prints "quick
+    // (local only)" for anything that is not exactly "full", so an
+    // unrecognised value made the document state a scope it did not have while
+    // still listing NETWORK findings underneath it.
+    mode: raw.mode === "full" ? "full" : "quick",
     version: str(raw.version),
     ts: num(raw.ts),
     sections: str(raw.sections),
@@ -53,8 +41,51 @@ function parseDoctor(text) {
   }
 }
 
+// str(v) -> a string, or "" for anything that has no sensible string form.
+//
+// The guard is not cosmetic. `String(obj)` THROWS "Cannot convert object to
+// primitive value" when the object carries a non-callable own toString, and JSON
+// can express exactly that: {"status":{"toString":"ok"}} parses fine and then
+// detonates inside String(). JSON.parse was guarded but the coercion that
+// followed it was not, so a malformed field threw straight through
+// Panel.qml's onStreamFinished.
+//
+// The policy is also consistent with strArray(): "[object Object]" in a
+// diagnostic report is worse than an absent line.
+// normCheck(raw) -> a fully normalised check.
+//
+// The ONE definition of what a check is. parseDoctor applies it to a decoded
+// document and buildReport applies it again to anything handed to it directly,
+// so a check is guaranteed to have a string id/category/title/value/detail/
+// suggestion, a valid status, a numeric severity, a details array and either a
+// normalised repair or null -- no caller needs its own guard, and no field can
+// throw at the point of use.
+function normCheck(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) raw = {}
+  return {
+    id: str(raw.id),
+    category: str(raw.category) || "system",
+    title: str(raw.title),
+    status: normStatus(raw.status),
+    severity: num(raw.severity),
+    value: str(raw.value),
+    detail: str(raw.detail),
+    suggestion: str(raw.suggestion),
+    // Both of these are OPTIONAL and purely additive: a check that does not
+    // carry them normalises to an empty list / null, so existing producers
+    // and renderers keep working untouched.
+    details: strArray(raw.details),
+    repair: normRepair(raw.repair)
+  }
+}
+
 function str(v) {
-  return v === undefined || v === null ? "" : String(v)
+  if (v === undefined || v === null) return ""
+  var t = typeof v
+  if (t === "string") return v
+  if (t === "number") return isFinite(v) ? String(v) : ""
+  if (t === "boolean") return v ? "true" : "false"
+  return ""
 }
 
 function num(v) {
@@ -62,10 +93,15 @@ function num(v) {
   return isFinite(n) ? n : 0
 }
 
+// normStatus(s) -> one of ok | info | attention | problem.
+//
+// Fails CLOSED: anything unrecognised, and anything that is not a plain string,
+// becomes "problem". A malformed producer must not be able to make a finding
+// disappear by shipping a status the parser has never heard of.
 function normStatus(s) {
-  s = String(s === undefined || s === null ? "" : s).toLowerCase()
-  if (s === "ok" || s === "info" || s === "attention" || s === "problem") return s
-  // An unrecognised status must never be silently treated as healthy.
+  if (typeof s !== "string") return "problem"
+  var t = s.trim().toLowerCase()
+  if (t === "ok" || t === "info" || t === "attention" || t === "problem") return t
   return "problem"
 }
 
@@ -126,6 +162,31 @@ function weight(status) {
   }
 }
 
+// checkWeight(check) -> the weight of one check, in 0..3.
+//
+// `severity` is the producer's OWN ranking and is authoritative when it is a
+// recognised value; the status is the fallback. Before this existed, severity
+// was parsed, round-tripped by the test suite as "a number", and then read by
+// nothing at all -- so {"status":"ok","severity":3} counted as healthy and
+// {"status":"problem","severity":0} counted as a problem. A field that is
+// documented in the check contract and pinned by a test, but inert, is worse
+// than an absent one: it looks like it is doing something.
+//
+// A producer that disagrees with itself is treated as the more serious of the
+// two. That is the fail-closed direction, and it is consistent with
+// normStatus, which turns an unrecognised status into "problem" rather than
+// "ok".
+function checkWeight(check) {
+  if (!check || typeof check !== "object") return 3
+  var byStatus = weight(check.status)
+  var sev = num(check.severity)
+  // Only 1 and 3 carry meaning: 0 is the default for a producer that does not
+  // rank at all, and any other value is not a rank this code understands.
+  if (sev !== 1 && sev !== 3) return byStatus
+  var bySeverity = sev === 3 ? 3 : 1
+  return bySeverity > byStatus ? bySeverity : byStatus
+}
+
 // overallState(checks) -> "ok" | "attention" | "problem"
 //
 // Worst-wins. A single problem check makes the whole scan a problem, because a
@@ -160,6 +221,10 @@ function diffScans(before, after) {
   // answer on the first scan, not "everything changed".
   if (!b || !a) return out
 
+  // hasOwnProperty, not truthiness: `seen[id] = true` is a silent no-op for an
+  // id of "__proto__" (the inherited setter) and an unrecorded own shadow for
+  // "toString", so the removal loop below read an inherited truthy value,
+  // skipped its increment, and undercounted `same`.
   var seen = {}
   for (var i = 0; i < a.checks.length; i++) {
     var now = a.checks[i]
@@ -167,8 +232,8 @@ function diffScans(before, after) {
     seen[id] = true
     var then = findCheck(b.checks, id)
     if (!then) { out.same++; continue }
-    var beforeW = weight(then.status)
-    var afterW = weight(now.status)
+    var beforeW = checkWeight(then)
+    var afterW = checkWeight(now)
     if (beforeW === afterW) { out.same++; continue }
     var entry = {
       id: id,
@@ -187,8 +252,14 @@ function diffScans(before, after) {
   // A check that existed before and is gone now is not a transition -- it is a
   // check that stopped running (a section failed, or a tool vanished). Count it
   // as unchanged so a section going silent is never reported as "fixed".
+  //
+  // hasOwnProperty, not truthiness: `seen[id] = true` is a silent no-op for an
+  // id of "__proto__" (inherited setter) and an unrecorded own shadow for
+  // "toString" and friends, so the truthiness test below read an INHERITED
+  // value, skipped its increment, and undercounted `same`.
   for (var j = 0; j < b.checks.length; j++) {
-    if (!seen[str(b.checks[j].id)]) out.same++
+    var oldId = str(b.checks[j].id)
+    if (!Object.prototype.hasOwnProperty.call(seen, oldId)) out.same++
   }
 
   // Worst-first within each group, so the panel can render straight through.
@@ -223,12 +294,27 @@ function changeSummary(diff) {
 }
 
 function overallState(checks) {
-  if (!Array.isArray(checks) || checks.length === 0) return "ok"
+  // An EMPTY scan is NOT healthy. It means the producer produced no findings,
+  // which is indistinguishable at this layer from a machine with nothing wrong
+  // with it -- and doctor.sh documents the opposite invariant ("a missing check
+  // must never be mistaken for a healthy one"). Returning "ok" here made the
+  // panel read HEALTHY, suppressed the notification, and produced a report
+  // saying "Nothing needs attention" for a scan that had checked nothing.
+  //
+  // "problem" is the fail-closed answer, and weight("problem") is the maximum,
+  // so an empty first scan still cannot notify (see shouldNotify Rule 3).
+  if (!Array.isArray(checks) || checks.length === 0) return "problem"
   var worst = 0
+  var seenAny = false
   for (var i = 0; i < checks.length; i++) {
-    var w = weight(checks[i].status)
+    var c = checks[i]
+    if (!c || typeof c !== "object") continue
+    seenAny = true
+    var w = checkWeight(c)
     if (w > worst) worst = w
   }
+  // Every element was null or a non-object: nothing was actually inspected.
+  if (!seenAny) return "problem"
   return worst >= 3 ? "problem" : worst >= 1 ? "attention" : "ok"
 }
 // ------------------------------------------------------------- notifications
@@ -304,15 +390,34 @@ function notificationText(scan) {
     (found.length === 1 ? " check to review" : " checks to review") +
     ". Click the icon for detail."
 }
+// eachReal(checks) -> the elements that are usable check objects.
+//
+// Every aggregation helper funnels through this. Two crashes came from not
+// doing so: a null element made counts([null]), issues([null]) and
+// overallState([null]) throw "Cannot read properties of null", and these
+// functions are exported, so a caller that filtered nothing -- or a document
+// from a producer that emitted a literal null -- took the panel's hot path down
+// with it. A non-object element carries no status, so it is not a check and is
+// simply not counted.
+function eachReal(checks) {
+  var out = []
+  if (!Array.isArray(checks)) return out
+  for (var i = 0; i < checks.length; i++) {
+    var c = checks[i]
+    if (c && typeof c === "object") out.push(c)
+  }
+  return out
+}
+
 // issues(checks) -> the checks a user should act on, worst first.
 function issues(checks) {
-  if (!Array.isArray(checks)) return []
+  var list = eachReal(checks)
   var out = []
-  for (var i = 0; i < checks.length; i++) {
-    if (weight(checks[i].status) > 0) out.push(checks[i])
+  for (var i = 0; i < list.length; i++) {
+    if (checkWeight(list[i]) > 0) out.push(list[i])
   }
   out.sort(function (a, b) {
-    var d = weight(b.status) - weight(a.status)
+    var d = checkWeight(b) - checkWeight(a)
     return d !== 0 ? d : String(a.category).localeCompare(String(b.category))
   })
   return out
@@ -321,9 +426,9 @@ function issues(checks) {
 // counts(checks) -> { ok, info, attention, problem, total }
 function counts(checks) {
   var c = { ok: 0, info: 0, attention: 0, problem: 0, total: 0 }
-  if (!Array.isArray(checks)) return c
-  for (var i = 0; i < checks.length; i++) {
-    var s = normStatus(checks[i].status)
+  var list = eachReal(checks)
+  for (var i = 0; i < list.length; i++) {
+    var s = normStatus(list[i].status)
     c[s]++
     c.total++
   }
@@ -399,15 +504,24 @@ function byCategory(checks) {
   var order = ["system", "services", "hyprland", "network", "audio", "storage",
                "bluetooth", "boot"],
     seen = {}, buckets = []
+  var list = eachReal(checks)
   if (!Array.isArray(checks)) return buckets
 
-  for (var i = 0; i < checks.length; i++) {
-    var cat = str(checks[i].category) || "system"
-    if (!seen[cat]) {
+  for (var i = 0; i < list.length; i++) {
+    var cat = str(list[i].category) || "system"
+    // A bare {} has Object.prototype in its chain, so for a category named
+    // "toString", "constructor", "__proto__" and friends, seen[cat] is an
+    // INHERITED truthy value: the bucket is never created and seen[cat].checks
+    // is undefined, so the push below throws. parseDoctor normalises the
+    // category straight through, so this was reachable from a document and
+    // crashed byCategory -- which is on the panel's hot path, in
+    // notificationText and in buildReport. Object.create(null) gives the map a
+    // null prototype, so only real keys are ever found.
+    if (!Object.prototype.hasOwnProperty.call(seen, cat)) {
       seen[cat] = { category: cat, checks: [] }
       buckets.push(seen[cat])
     }
-    seen[cat].checks.push(checks[i])
+    seen[cat].checks.push(list[i])
   }
 
   buckets.sort(function (a, b) {
@@ -427,9 +541,10 @@ function byCategory(checks) {
 
 // findCheck(checks, id) -> the matching check, or null.
 function findCheck(checks, id) {
-  if (!Array.isArray(checks)) return null
-  for (var i = 0; i < checks.length; i++) {
-    if (String(checks[i].id) === String(id)) return checks[i]
+  var list = eachReal(checks)
+  var want = str(id)
+  for (var i = 0; i < list.length; i++) {
+    if (str(list[i].id) === want) return list[i]
   }
   return null
 }
@@ -501,69 +616,177 @@ function stateLabel(state) {
 //
 // Defaults to redacting on. The report is the main way a user's machine details
 // leave their machine, so the safe behaviour is the default behaviour.
+//
+// Order matters. MACs go before IPv6 (whose hex groups would otherwise look
+// similar), IPv4-embedded IPv6 before bare IPv6, IPv6 before IPv4, and the
+// filesystem paths before the bare username (otherwise /home/<user> is
+// rewritten first and o.home never matches).
+//
+// Escape hatch: redact(text, { raw: true }) returns the text untouched. It
+// exists for the "review before copying" path, never for the clipboard.
 function redact(text, opts) {
   var o = opts || {}
+  if (o.raw === true) return String(text === undefined || text === null ? "" : text)
+
   var s = String(text === undefined || text === null ? "" : text)
+  if (!s) return s
 
-  // MAC addresses (before IPv6, whose hex groups would otherwise look similar).
-  s = s.replace(/\b([0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5})\b/g, "<mac>")
-  s = s.replace(/\b([0-9a-fA-F]{2}-[0-9a-fA-F]{2}(-[0-9a-fA-F]{2}){4})\b/g, "<mac>")
-
-// IPv4-mapped and IPv4-compatible IPv6 ("::ffff:1.2.3.4", "::1.2.3.4").
-// These embed a dotted quad, so the trailing-group lookahead below would stop
-// at the first dot and leave "192.168.1.1" exposed. Match them first.
-  s = s.replace(/(?<![0-9a-fA-F:.])(?:::(?:ffff:)?)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?![0-9.])/g, "<ipv6>");
-
-  // IPv6 must be handled before plain IPv4, and must match the WHOLE address.
-  // Doing it the other way round leaves `::ffff:192.168.x.x` (exposing the
-  // "::ffff:" prefix) and splits long addresses into a real prefix plus a
-  // masked tail, e.g. "2001:db8::<ipv6>" -- which still leaks the prefix.
+  // ------------------------------------------- storage identifiers FIRST
+  // These run before the MAC rules because a UUID and a volume serial are full
+  // of hex that the separator-based MAC patterns also match: masking the MACs
+  // first turned "/mnt/c30f4f52-994d-4076-b4cd-5edb0d09e6ef" into
+  // "/mnt/<volume><uuid>b4cd-<mac>", which is both wrong and no less revealing.
   //
-  // The patterns accept both full (8-group) and compressed ("::") forms, with
-  // the leading group optional so bare "::1" matches and the trailing part
-  // allowing an embedded IPv4 form. Boundaries are non-hex/non-colon on the
-  // left and non-hex/non-dot on the right, so "2001:db8::8a2e:370:7334" is
-  // consumed whole rather than up to its first dot.
-  //
-  // Both patterns run through maskIPv6, which rejects the clock-time shapes
-  // ("08:04:18", "1:2:3") that are hex-legal and would otherwise eat every
-  // timestamp in the report header. A real address either uses "::", or has
-  // 4+ groups, or carries a group that is not a bare 1-2 digit decimal --
-  // "2001:db8::1", "fe80:0:0:0:0:0:0:1", and "abcd:ef01:..." all do.
-  function maskIPv6(match) {
-    if (match.indexOf("::") !== -1) return "<ipv6>"
-    var groups = match.split(":")
-    if (groups.length >= 4) return "<ipv6>"
-    // 2 or 3 groups, no compression: only an address if some group is not a
-    // short decimal run ("0d 3h 57m" and "2.42 / 1.73" must survive).
-    for (var i = 0; i < groups.length; i++) {
-      if (!/^\d{1,2}$/.test(groups[i])) return "<ipv6>"
-    }
-    return match
-  }
-
+  // A filesystem UUID or a disk serial is a stable hardware fingerprint, and on
+  // a typical Omarchy box the two mounted data volumes are named by exactly
+  // these.
+  s = s.replace(/\/mnt\/[A-Za-z0-9._-]+/g, "/mnt/<volume>");
+  s = s.replace(/\/media\/[A-Za-z0-9._-]+/g, "/media/<volume>");
+  s = s.replace(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g, "<uuid>");
+  s = s.replace(/\b([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-)\d{4}-/g, "$1<uuid>-");
+  // 16-hex uppercase is the NTFS/volume-serial convention; an explicit
+  // "serial" label covers hdparm/lsblk/udev output in any width.
+  s = s.replace(/\b([0-9A-F]{16})\b/g, "<serial>");
+  // An explicit "serial" label. Two forms, because they are genuinely
+  // different in practice: with punctuation (hdparm "serial: X", udev
+  // "SERIAL=X") the label is unambiguous; without it (prose "serial X") the
+  // word "serial" also appears in phrases like "serial number is not shown",
+  // so the value must additionally look like a serial -- six characters or
+  // more AND containing a digit -- before it is treated as one.
   s = s.replace(
-    /(?<![0-9a-fA-F:.])(?:[0-9a-fA-F]{1,4}:){2,}(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4})*|(?::[0-9a-fA-F]{1,4})+)|(?<![0-9a-fA-F:])(?:[0-9a-fA-F]{0,4}:){2,}[0-9a-fA-F]{0,4}(?![0-9a-fA-F:])/g,
-    maskIPv6
+    /\b(serials?(?:\s+number)?|serial_number)(\s*[:=]\s*)"?[A-Za-z0-9_-]{4,}"?/gi,
+    function (m, label, sep) { return label + sep + "<serial>"; }
   );
-  // Compressed forms with few groups, e.g. "::1", "fe80::", "2001:db8::1".
-  s = s.replace(/(?<![0-9a-fA-F:])(?:[0-9a-fA-F]{1,4})?::(?:[0-9a-fA-F]{1,4}){0,3}(?![0-9a-fA-F:])/g, "<ipv6>");
+  s = s.replace(/\bserial\s+([A-Za-z0-9][A-Za-z0-9_-]{5,})\b/gi, function (m, value) {
+    return /\d/.test(value) ? "serial <serial>" : m;
+  });
 
-  // Plain IPv4: keep the first two octets as the subnet, mask the host part.
+  // ---------------------------------------------------------------- MAC
+  // Six separator conventions are in real use: ip/udev/bluetoothctl print the
+  // Cisco form aabb.ccdd.eeff, some tools print aa.bb.cc.dd.ee.ff, sysfs
+  // exposes a bare 12-hex perm_address, and underscore separators appear in
+  // config files. Only the colon and dash forms were handled before, so the
+  // others reached a public issue untouched.
+  //
+  // The bare 12-hex rule is deliberately greedy. It will occasionally mask a
+  // non-MAC token, which costs a little detail; masking too little costs
+  // privacy in a document whose entire purpose is to be pasted to strangers.
+  s = s.replace(/\b[0-9a-fA-F]{2}(?:[:-][0-9a-fA-F]{2}){5}\b/g, "<mac>");
+  s = s.replace(/\b[0-9a-fA-F]{4}(?:\.[0-9a-fA-F]{4}){2}\b/g, "<mac>");
+  s = s.replace(/\b[0-9a-fA-F]{2}(?:\.[0-9a-fA-F]{2}){5}\b/g, "<mac>");
+  s = s.replace(/\b[0-9a-fA-F]{2}(?:_[0-9a-fA-F]{2}){5}\b/g, "<mac>");
+  s = s.replace(/\b[0-9a-fA-F]{12}\b/g, "<mac>");
+
+  // ---------------------------------------------------------------- IPv6
+  // Two patterns, both anchored so a match cannot begin inside a longer token.
+  //
+  // (1) IPv4-embedded: a colon-bearing run followed by a dotted quad. This is
+  //     every IPv4-mapped ("::ffff:1.2.3.4"), IPv4-compatible ("::1.2.3.4"),
+  //     NAT64 ("64:ff9b::1.2.3.4") and 6to4 ("2002::1.2.3.4") address.
+  //     It must be matched BEFORE plain IPv4, because otherwise the IPv4 rule
+  //     consumes the quad first and the reader is left with a bare, meaningless
+  //     "<ipv6>.168.1.5" -- which also leaks three of the four octets of a real
+  //     address.
+  s = s.replace(
+    /(?<![0-9a-fA-F:.])(?=[0-9a-fA-F:]*[0-9a-fA-F:])[0-9a-fA-F]*:[0-9a-fA-F:.]*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?![0-9.])/g,
+    "<ipv6>"
+  );
+
+  // (2) Plain hex groups. A run of 2..8 colon-separated hex groups is a
+  //     candidate, and is only masked when it is genuinely an address:
+  //     either it uses "::" compression, or it has the full 8 groups.
+  //
+  //     This predicate is what protects file:line:col. Omarchy's Hyprland
+  //     config is hyprland.lua, so `hyprctl configerrors` hands us
+  //     "hyprland.lua:42:12: unknown keyword" and the report -- whose own
+  //     advice is "open the file and line named in each error" -- used to
+  //     print "hyprland.lu<ipv6>". The earlier matcher used a `{0,4}`
+  //     quantifier that could match EMPTY hex groups, so ":12:4" and
+  //     ":ffff:192" were both eligible; "css:12:4" is a three-group run and
+  //     is now correctly left alone, as are "08:04:18" and "1:2:3".
+  s = s.replace(
+    /(?<![0-9a-fA-F:.])(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}(?![0-9a-fA-F:])/g,
+    function (match) {
+      if (match.indexOf("::") !== -1) return "<ipv6>"
+      var groups = match.split(":")
+      while (groups.length && groups[groups.length - 1] === "") groups.pop()
+      return groups.length >= 8 ? "<ipv6>" : match
+    }
+  );
+
+  // An IPv6 zone suffix identifies the interface as surely as the address
+  // identifies the host: "fe80::1%wlp3s0" used to become "<ipv6>%wlp3s0".
+  s = s.replace(/(<ipv6>)(?:%[0-9A-Za-z._-]+)+/g, "$1");
+
+  // ---------------------------------------------------------------- IPv4
+  // Keep the first two octets as the subnet, mask the host part.
   s = s.replace(/\b(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}\b/g, "$1.$2.x.x")
 
-  if (o.hostname) {
-    s = s.split(o.hostname).join("<host>")
-  }
-  if (o.username) {
-    s = s.split(o.username).join("<user>")
-    // Also catch the home directory form (/home/<user>).
-    s = s.split("/home/" + o.username).join("/home/<user>")
+  // ------------------------------------------------------------- network
+  // SSID / ESSID is the name of the user's home network. The optional closing
+  // quote is consumed with the value so no stray " is left behind.
+  s = s.replace(/\b((?:E?SSID)\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\n",]+)/gi, "$1<ssid>");
+  // The interface name in an ARP/NDP line is a PCI-derived name that discloses
+  // the DMI product string. The keyword is kept because "dev <iface>" still
+  // says which line of evidence this is.
+  s = s.replace(/\b(dev|iface|interface|ifname)\s+([A-Za-z0-9_.:-]+)/gi, "$1 <iface>");
+  // Kernel-derived interface names, which are unambiguous -- no diagnostic prose
+  // contains "eno1" or "wlp3s0" by accident -- so they need no keyword.
+  s = s.replace(/\b(?:enp\d\w*|eno\d|ens\d\w*|enp0s\d+\w*)\b/g, "<iface>");
+  s = s.replace(/\bwlp\d+s?\d*|wlan\d+|wl\d+s?\d*\b/g, "<iface>");
+
+  // ------------------------------------------------------- hostname / user
+  //
+  // A bare token equal to the machine's hostname IS the hostname and is always
+  // masked. A DOTTED token is treated as a domain name and left alone, because
+  // OmaDoctor's own default hostname is "omarchy" and the DNS evidence quotes
+  // the public site "omarchy.org" -- masking that would destroy a fact about a
+  // website in order to redact a fact about the local machine, leaving the
+  // report unable to say which lookup failed. The residual exposure is a local
+  // domain name (also published by mDNS on every LAN), not the host identity.
+  if (o.hostname && o.hostname.length >= 2) {
+    var host = o.hostname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    s = s.replace(new RegExp("(^|[^0-9A-Za-z._-])" + host + "(?![0-9A-Za-z-]|\\.[A-Za-z])", "g"),
+      "$1<host>")
   }
   if (o.home) {
+    // Applied BEFORE the username rule. The old order rewrote /home/<user>
+    // first, which made o.home unreachable -- it was dead code in production,
+    // since Panel.qml always passes both.
     s = s.split(o.home).join("~")
   }
+  if (o.username && o.username.length >= 2) {
+    // The /home/<user> form is substituted exactly first.
+    s = s.split("/home/" + o.username).join("/home/<user>")
+    // Then the bare name, but only on word boundaries. An unconditional
+    // split/join on a one- or two-character username rewrites unrelated words:
+    // username "d" turned "Devices detected" into "Devices <user>etecte<user>".
+    var user = o.username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    s = s.replace(new RegExp("(^|[^0-9A-Za-z._/-])" + user + "(?![0-9A-Za-z_-])", "g"),
+      "$1<user>")
+  }
+
+  // ---------------------------------------------------------------- paths
+  // /root belongs to the same person as $HOME for every practical purpose in a
+  // report, and o.home does not cover it.
+  s = s.replace(/\/root(?=\/|\b)/g, "~")
+
   return s
+}
+
+// redactGaps(opts) -> array of redaction inputs that were NOT supplied.
+//
+// A report that silently omits a redaction rule is worse than one that says so:
+// the reader cannot distinguish "nothing identifying was found" from
+// "redaction was disabled for this field". Panel.qml surfaces this in the UI
+// and in the report footer when it is non-empty.
+function redactGaps(opts) {
+  var o = opts || {}
+  var gaps = []
+  if (!o.hostname || o.hostname.length < 2) gaps.push("hostname")
+  if (!o.username || o.username.length < 2) gaps.push("username")
+  if (!o.home) gaps.push("home directory")
+  return gaps
 }
 
 // ------------------------------------------------------------------- report
@@ -576,11 +799,52 @@ function redact(text, opts) {
 // opts.pluginVersion
 function buildReport(scan, opts) {
   var o = opts || {}
-  var s = scan && Array.isArray(scan.checks) ? scan : null
+  // A scan is NORMALISED before it is rendered, not merely shape-checked. This
+  // function is exported, and buildReportText's happy path is not the only way
+  // in: given a hand-built or QML-mutated document it used to throw on
+  // `x.status.toUpperCase()` for a missing status, print "Repair : UNDEFINED"
+  // when repair was a bare string, and render an uppercase "OK" as [FAIL] while
+  // the FINDINGS section said "Nothing needs attention". normCheck is the single
+  // definition of what a check is, and everything downstream can rely on it.
+  var s = scan && Array.isArray(scan.checks)
+    ? {
+        mode: scan.mode === "full" ? "full" : "quick",
+        version: str(scan.version),
+        ts: num(scan.ts),
+        checks: eachReal(scan.checks).map(normCheck)
+      }
+    : null
   if (!s) return "OmaDoctor\n\nNo scan data available."
 
   var redactOn = o.redact !== false
   var ri = o.redactInfo || {}
+
+  // oneLine(v) -> v flattened to a single line.
+  //
+  // A producer can put a newline inside a value: hyprctl, journalctl and df all
+  // emit multi-line output, and a section that scraped any of it carries the
+  // break straight into `value`. That let a check FORGE a line in the report:
+  //
+  //   value: "line1\n  [ok] Fake check passed: everything is fine"
+  //
+  // rendered a fabricated passing check beside the real one. The report is meant
+  // to be pasted to strangers, so no producer may write into its structure.
+  // details[] entries are already one-per-line by construction and are exempt.
+  function oneLine(v) {
+    return str(v).replace(/[\r\n]+/g, " ").replace(/[ \t]+/g, " ").trim()
+  }
+
+  // isoUtc(v) -> a UTC timestamp, or a clear marker instead of a RangeError.
+  // new Date(1e21).toISOString() throws, and a non-numeric input silently
+  // produced 1970 -- which is a poor thing to print in a document whose whole
+  // purpose is temporal evidence.
+  function isoUtc(v) {
+    var n = Number(v)
+    if (!isFinite(n) || Math.abs(n) > 253402300799) return "unknown"
+    var ms = n * 1000
+    if (Math.abs(ms) > 8.64e15) return "unknown"
+    return new Date(ms).toISOString().replace("T", " ").slice(0, 19) + " UTC"
+  }
 
   var state = overallState(s.checks)
   var c = counts(s.checks)
@@ -590,18 +854,30 @@ function buildReport(scan, opts) {
   out.push("OMADOCTOR DIAGNOSTIC REPORT")
   out.push("=".repeat(52))
   out.push("")
-  out.push("Generated : " + new Date(num(o.now) * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC")
+  out.push("Generated : " + isoUtc(o.now))
   out.push("Scan       : " + (s.mode === "full" ? "full (includes network)" : "quick (local only)"))
-  out.push("Plugin     : OmaDoctor " + str(o.pluginVersion || s.version))
+  out.push("Plugin     : OmaDoctor " + str(o.pluginVersion || s.version).trim())
   if (s.ts) out.push("Scan taken : " + fmtAge(s.ts, num(o.now)))
   if (o.redact === false) out.push("Redaction  : DISABLED -- this report may identify you")
+  // A redaction input that never arrived is a SILENT privacy hole, and the
+  // reader cannot tell "nothing identifying was found" from "this rule was
+  // off". Panel.qml passes Quickshell.env("HOSTNAME"), which is a shell
+  // variable rather than an exported one on many systems, so it arrives empty
+  // and the hostname was never masked while the footer claimed it was.
+  if (redactOn) {
+    var gaps = redactGaps(ri)
+    if (gaps.length > 0) {
+      out.push("Redaction  : INCOMPLETE -- could not determine " + gaps.join(", ") +
+        ". Read the report before sharing it.")
+    }
+  }
 
   var sys = findCheck(s.checks, "system.os")
   var kern = findCheck(s.checks, "system.kernel")
   var arch = findCheck(s.checks, "system.arch")
-  if (sys) out.push("System     : " + sys.value)
-  if (kern) out.push("Kernel     : " + kern.value)
-  if (arch) out.push("Arch       : " + arch.value)
+  if (sys) out.push("System     : " + oneLine(sys.value))
+  if (kern) out.push("Kernel     : " + oneLine(kern.value))
+  if (arch) out.push("Arch       : " + oneLine(arch.value))
 
   out.push("")
   out.push("RESULT: " + stateLabel(state) +
@@ -613,15 +889,15 @@ function buildReport(scan, opts) {
   var buckets = byCategory(s.checks)
   for (var i = 0; i < buckets.length; i++) {
     var b = buckets[i]
-    out.push(str(b.category).toUpperCase())
-    out.push("-".repeat(Math.max(4, str(b.category).length)))
+    out.push(oneLine(b.category).toUpperCase())
+    out.push("-".repeat(Math.max(4, oneLine(b.category).length)))
     for (var j = 0; j < b.checks.length; j++) {
       var k = b.checks[j]
       var mark = k.status === "ok" ? "ok  " : (k.status === "info" ? "info" : k.status === "attention" ? "WARN" : "FAIL")
-      out.push("  [" + mark + "] " + str(k.title) +
-        (k.value ? ": " + str(k.value) : ""))
+      out.push("  [" + mark + "] " + oneLine(k.title) +
+        (k.value ? ": " + oneLine(k.value) : ""))
       if (k.detail && (k.status === "attention" || k.status === "problem" || k.status === "info")) {
-        out.push("         " + str(k.detail))
+        out.push("         " + oneLine(k.detail))
       }
     }
     out.push("")
@@ -642,23 +918,25 @@ function buildReport(scan, opts) {
     for (var f = 0; f < found.length; f++) {
       var x = found[f]
       out.push("")
-      out.push("  " + (f + 1) + ". [" + x.status.toUpperCase() + "] " + str(x.title) +
-        (x.value ? " — " + str(x.value) : ""))
-      if (x.detail) out.push("     Evidence : " + str(x.detail))
+      out.push("  " + (f + 1) + ". [" + x.status.toUpperCase() + "] " + oneLine(x.title) +
+        (x.value ? " — " + oneLine(x.value) : ""))
+      if (x.detail) out.push("     Evidence : " + oneLine(x.detail))
       // Structured evidence: the multi-line "here is what I measured" block a
       // detail string cannot carry (per-monitor state, config error lines).
+      // Each entry is already one line by construction, but a producer could
+      // still embed a break, so it is flattened too.
       if (x.details && x.details.length > 0) {
         for (var d = 0; d < x.details.length; d++) {
-          out.push("       - " + str(x.details[d]))
+          out.push("       - " + oneLine(x.details[d]))
         }
       }
-      if (x.suggestion) out.push("     Suggested: " + str(x.suggestion))
+      if (x.suggestion) out.push("     Suggested: " + oneLine(x.suggestion))
       // Descriptive only: what a fix WOULD be. Never executed.
       if (x.repair) {
         out.push("     Repair   : " + String(x.repair.tier).toUpperCase() +
-          " — " + str(x.repair.label))
+          " — " + oneLine(x.repair.label))
         if (x.repair.detail) {
-          out.push("       " + str(x.repair.detail))
+          out.push("       " + oneLine(x.repair.detail))
         }
       }
     }
