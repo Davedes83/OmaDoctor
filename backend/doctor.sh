@@ -17,7 +17,7 @@
 # a missing check must never be mistaken for a healthy one.
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/bootstrap.sh"
 
-VERSION="0.3.0"
+VERSION="0.4.0"
 
 MODE=quick
 CHECKS_ONLY=0

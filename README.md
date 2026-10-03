@@ -82,6 +82,50 @@ Inside the panel:
 The bar shows the current state as a glyph and re-runs a quick scan every 30
 seconds so the icon is current even when you never open the panel.
 
+### Keyboard shortcut
+
+OmaDoctor is keyboard-first, so a bind is worth setting up. Add this to
+`~/.config/hypr/bindings.lua`:
+
+```lua
+o.bind("SUPER + SHIFT + D", "OmaDoctor", "omarchy-shell shell toggle davedes.omadoctor")
+```
+
+`omarchy-shell shell toggle <plugin-id>` is the shell's own method: it opens
+the panel if it is closed and hides it if it is open. `SUPER + D` is already
+taken by the dictionary lookup on some setups — check with
+`omarchy menu keybindings --print` and pick a free combination.
+
+To re-run a full diagnosis without opening anything, invoke the plugin's IPC
+handler directly:
+
+```lua
+o.bind("SUPER + SHIFT + D", "Diagnose now",
+  "quickshell ipc -p $OMARCHY_PATH/shell call davedes.omadoctor runFullScan")
+```
+
+Note that `omarchy-shell shell call ...` does **not** reach a plugin's own IPC
+handler — it answers `unknown` and does nothing. The `toggle` method above is
+different: that one belongs to the shell itself, which is why it works.
+
+### Notifications
+
+OmaDoctor notifies only when the machine gets **worse**, never when it gets
+better, and never about a scan you asked for:
+
+| Transition                        | Notification |
+|-----------------------------------|--------------|
+| healthy → attention / problem     | yes, once    |
+| attention → problem               | yes, once    |
+| problem stays problem             | no — repeating an unacknowledged warning just trains you to ignore it |
+| anything → healthy                | no — you already know you fixed it |
+| first scan after login            | no — a baseline is not a transition; this would report the state you have been living with |
+| any scan you triggered yourself   | no — the result is already on screen |
+
+The policy is `Model.shouldNotify` in [`Model.js`](Model.js), which is
+unit-tested as a truth table because a notification rule can otherwise only be
+verified by waiting for something to go wrong.
+
 ## Privacy
 
 Everything runs locally. There is no telemetry and nothing is uploaded.

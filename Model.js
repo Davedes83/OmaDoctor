@@ -139,7 +139,79 @@ function overallState(checks) {
   }
   return worst >= 3 ? "problem" : worst >= 1 ? "attention" : "ok"
 }
+// ------------------------------------------------------------- notifications
+//
+// The policy lives here, not in Panel.qml, so it is unit-testable. A
+// notification rule that can only be verified by waiting for something to go
+// wrong on a real machine is a rule that ships broken.
+//
+// The four rules, in priority order:
+//
+//   1. Only a WORSENING transition notifies. Healthy is silent, and so is
+//      recovery: a panel that congratulates you for fixing a problem you
+//      already knew about is noise. (Design brief: "Healthy -> no
+//      notification, Attention -> once, Critical -> immediately".)
+//   2. Only ONCE per state. The quick scan runs on a timer, so a machine that
+//      stays broken would otherwise notify every thirty seconds until the
+//      user turned the panel off. Repeating an unacknowledged warning trains
+//      people to ignore the one that mattered.
+//   3. Never on the FIRST scan. A baseline is not a transition. Without this,
+//      every shell start would notify about whatever was already wrong --
+//      which is precisely the state the user has been living with, not news.
+//      NOTE: this is NOT a separate code path. It falls out of the weight
+//      comparison, because weight() degrades an absent/unknown state through
+//      normStatus to "problem" (3) -- the maximum -- so nothing can be worse
+//      than "no baseline" and Rule 2 rejects every first scan. That makes Rule
+//      3 dependent on a property of weight(), which tests/model-tests.js pins
+//      explicitly. Do not "simplify" normStatus to default to "ok": that
+//      silently turns every shell start into a notification.
+//   4. Never for a scan the USER asked for. If they just ran a full diagnosis,
+//      they are looking at the result; a notification restating it is noise.
+//
+// opts.userInitiated  the user triggered this scan (panel action, IPC call)
+// opts.prevState      the state BEFORE this scan; falsy on the first scan
+//
+// Returns true only when a notification should fire now.
+function shouldNotify(prevState, nextState, opts) {
+  var o = opts || {}
+  // Rule 4: they just asked; they can see it.
+  if (o.userInitiated) return false
+  var before = weight(prevState)
+  var after = weight(nextState)
+  // Rule 2: same or lower weight. Equal covers "problem stays problem", which
+  // is the common case on a machine that is simply broken.
+  if (after <= before) return false
+  // Rule 1: recovery and healthy are silent (both have weight 0 or lower).
+  return true
+}
 
+// notificationText(scan) -> the notification body, or null when there is
+// nothing worth saying.
+//
+// Separate from shouldNotify so the content is testable on its own: a correct
+// policy with an unreadable message is still a broken notification.
+function notificationText(scan) {
+  if (!scan || !Array.isArray(scan.checks)) return null
+  var found = issues(scan.checks)
+  if (found.length === 0) return null
+
+  // Name the categories, worst first, rather than listing individual checks:
+  // a notification is one glance, and the panel has the detail.
+  var cats = byCategory(scan.checks)
+  var names = []
+  for (var i = 0; i < cats.length; i++) {
+    if (cats[i].issueCount > 0) names.push(String(cats[i].category).toUpperCase())
+  }
+  if (names.length === 0) return null
+
+  var worst = weight(overallState(scan.checks)) >= 3 ? "problem" : "needs attention"
+  var where = names.length <= 3
+    ? names.join(", ")
+    : names.slice(0, 3).join(", ") + " +" + (names.length - 3)
+  return where + " " + worst + " -- " + found.length +
+    (found.length === 1 ? " check to review" : " checks to review") +
+    ". Click the icon for detail."
+}
 // issues(checks) -> the checks a user should act on, worst first.
 function issues(checks) {
   if (!Array.isArray(checks)) return []

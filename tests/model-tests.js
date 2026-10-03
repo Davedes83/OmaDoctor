@@ -18,8 +18,9 @@ const src = fs.readFileSync(modelPath, "utf8");
 // Expose the library functions we want to test on the context global.
 const EXPORTS = [
   "parseDoctor", "overallState", "issues", "counts", "byCategory",
-  "findCheck", "fmtAge", "glyph", "stateLabel", "redact", "buildReport",
-  "buildReportText", "findingRows", "strArray", "normRepair"
+  "findCheck", "weight", "normStatus", "fmtAge", "glyph", "stateLabel", "redact", "buildReport",
+  "buildReportText", "findingRows", "strArray", "normRepair",
+  "shouldNotify", "notificationText"
 ];
 
 const ctx = vm.createContext({ JSON, Math, String, Number, Array, Object, isFinite, Date });
@@ -297,7 +298,203 @@ eq("byCategory ordering is stable regardless of input order",
   M.byCategory([{ category: "hyprland" }, { category: "services" }, { category: "system" }])
     .map(b => b.category).join(","));
 
-// ------------------------------------------------- optional details + repair
+// ---------------------------------------------------------------- notifications
+//
+// The policy is the opposite of "if there is a problem, pop up a box". It
+// notifies on a WORSENING TRANSITION, once, never on the first scan, and never
+// for a scan the user asked for. Each of those rules exists because the obvious
+// implementation gets it wrong:
+//
+//   * notify whenever there is a problem  -> the 30s timer re-notifies forever
+//   * notify on the first scan             -> every shell start reports the
+//                                            state the user has been living with
+//   * notify after the user runs a scan   -> restating what is on screen
+//
+// These are asserted as a truth table because the interaction between the
+// rules is where the bugs live.
+
+// Rule 1: only a worsening transition speaks.
+eq("healthy -> attention notifies", true,
+  M.shouldNotify("ok", "attention", {}));
+eq("attention -> problem notifies", true,
+  M.shouldNotify("attention", "problem", {}));
+eq("ok -> problem notifies", true,
+  M.shouldNotify("ok", "problem", {}));
+
+// Rule 1 (negative): recovery and healthy are silent.
+eq("problem -> attention does not notify", false,
+  M.shouldNotify("problem", "attention", {}));
+eq("problem -> ok does not notify", false,
+  M.shouldNotify("problem", "ok", {}));
+eq("attention -> ok does not notify", false,
+  M.shouldNotify("attention", "ok", {}));
+eq("ok -> ok does not notify", false,
+  M.shouldNotify("ok", "ok", {}));
+// info is weight 0, the same as ok, so neither direction is news.
+eq("ok -> info does not notify", false,
+  M.shouldNotify("ok", "info", {}));
+eq("info -> ok does not notify", false,
+  M.shouldNotify("info", "ok", {}));
+
+// Rule 2: an unchanged problem is not news. Without this, a machine that stays
+// broken re-notifies every poll cycle until the user ignores the panel.
+eq("problem -> problem does not re-notify", false,
+  M.shouldNotify("problem", "problem", {}));
+eq("attention -> attention does not re-notify", false,
+  M.shouldNotify("attention", "attention", {}));
+
+// Rule 3: no baseline, no notification.
+//
+// Rule 3 has NO code path of its own -- it falls out of the weight comparison,
+// because weight() degrades an absent or unknown state to "problem" (3), the
+// maximum, so nothing can be worse than "no baseline". An explicit
+// `if (!prevState) return false` was tried and deleted: removing it changed no
+// behaviour, so the guard was untestable decoration.
+//
+// That makes Rule 3 a DEPENDENCY on weight()'s degradation rather than on its
+// own line of code. So the dependency is pinned here instead: if normStatus or
+// weight ever stops degrading to the maximum, these go red BEFORE the shell
+// start notifications appear.
+eq("an absent baseline weighs the maximum", 3, M.weight(null));
+eq("an undefined baseline weighs the maximum", 3, M.weight(undefined));
+eq("an empty baseline weighs the maximum", 3, M.weight(""));
+eq("an unrecognised baseline weighs the maximum", 3, M.weight("banana"));
+// This is the load-bearing one. If normStatus ever defaults to "ok" instead of
+// "problem", weight(null) becomes 0 and every shell start announces whatever
+// the first scan finds.
+eq("an absent baseline is treated as a problem, not as healthy", "problem",
+  M.normStatus(null));
+
+eq("the first scan never notifies", false,
+  M.shouldNotify(null, "problem", {}));
+eq("an undefined baseline never notifies", false,
+  M.shouldNotify(undefined, "problem", {}));
+eq("an empty baseline never notifies", false,
+  M.shouldNotify("", "problem", {}));
+
+// Belt and braces: the first scan must be silent for EVERY possible next state,
+// whatever the first scan finds.
+{
+  let spoke = [];
+  for (const missing of [null, undefined, ""]) {
+    for (const next of ["ok", "info", "attention", "problem"]) {
+      if (M.shouldNotify(missing, next, {}) === true) spoke.push(`${missing}->${next}`);
+    }
+  }
+  if (spoke.length === 0) ok("first scan is silent for every possible next state");
+  else fail("first scan is silent for every possible next state", spoke.join(", "));
+}
+
+// Rule 4: a scan the user asked for is silent, whatever it finds.
+eq("a user-initiated scan never notifies", false,
+  M.shouldNotify("ok", "problem", { userInitiated: true }));
+eq("a user-initiated worsening still does not notify", false,
+  M.shouldNotify("attention", "problem", { userInitiated: true }));
+
+// A missing opts object is tolerated.
+eq("a background scan does notify on a real transition", true,
+  M.shouldNotify("ok", "problem", { userInitiated: false }));
+eq("a missing opts object is tolerated", true,
+  M.shouldNotify("ok", "attention"));
+
+// ------------------------------------------- whole sequences, as the panel runs
+//
+// shouldNotify is called with the PREVIOUS state and the baseline is then
+// advanced unconditionally -- exactly what Panel.qml does. Asserting single
+// pairs is not enough, because a policy can pass every pair and still
+// misbehave in sequence: the empty starting baseline weighs the MAXIMUM (see
+// above), so the whole design depends on that baseline being replaced after
+// the first scan. These sequences are what prove it actually is.
+{
+  function run(seq) {
+    let prev = "";
+    const fired = [];
+    for (const next of seq) {
+      if (M.shouldNotify(prev, next, {})) fired.push(next);
+      prev = next;
+    }
+    return fired;
+  }
+  eq("a healthy machine never notifies", [], run(["ok", "ok", "ok", "ok"]));
+  eq("breaking a healthy machine notifies exactly once",
+    ["problem"], run(["ok", "problem", "problem", "problem"]));
+  eq("a machine already broken at login stays silent",
+    [], run(["problem", "problem", "problem"]));
+  eq("recovery is silent but a later relapse notifies again",
+    ["problem", "problem"], run(["ok", "problem", "ok", "ok", "problem"]));
+  // ok -> attention and then attention -> problem are TWO distinct
+  // worsenings, so both speak: the brief asks for "attention once" AND
+  // "critical immediately". Suppressing the second would be wrong -- the
+  // machine got worse, and that is exactly the moment worth surfacing.
+  eq("attention then problem notifies on each step",
+    ["attention", "problem"], run(["ok", "attention", "problem", "problem"]));
+  eq("a problem that only ever improves notifies once",
+    ["problem"], run(["ok", "problem", "attention", "ok"]));
+}
+
+// An unrecognised state must not be treated as the quiet one, or a malformed
+// scan would be able to announce itself as an improvement. normStatus degrades
+// an unknown value to "problem" (weight 3), so an unknown previous state is
+// already the loudest thing there is and nothing can be worse than it: stay
+// silent. The mirror case is the one that matters -- an unknown NEXT state must
+// not read as "recovered".
+eq("an unrecognised previous state gates a notification", false,
+  M.shouldNotify("banana", "problem", {}));
+eq("an unrecognised next state does not announce an improvement", false,
+  M.shouldNotify("problem", "banana", {}));
+
+// ------------------------------------------------------- notification text
+
+const notifScan = M.parseDoctor(JSON.stringify({
+  mode: "quick", ts: 1700000000,
+  checks: [
+    { id: "s.ok", category: "system", title: "OS", status: "ok", severity: 0, value: "Omarchy" },
+    { id: "n.1", category: "network", title: "Gateway", status: "attention", severity: 1, value: "182 ms" },
+    { id: "a.1", category: "audio", title: "Volume", status: "problem", severity: 3, value: "0%" }
+  ]
+}));
+const notifText = M.notificationText(notifScan);
+// Categories come out in the machine-shape order (byCategory's order array
+// puts network before audio), NOT severity order. That is deliberate and
+// consistent with the panel, so a notification and the panel list the same
+// categories in the same sequence -- seeing one order on the notification and
+// another in the panel would be worse than either.
+if (notifText && notifText.indexOf("NETWORK, AUDIO") !== -1) {
+  ok("notification names the affected categories in panel order");
+} else {
+  fail("notification names the affected categories in panel order", String(notifText));
+}
+if (notifText && notifText.indexOf("problem") !== -1) ok("notification says how bad it is");
+else fail("notification says how bad it is", String(notifText));
+if (notifText && /detail/.test(notifText)) ok("notification points at the panel for detail");
+else fail("notification points at the panel for detail", String(notifText));
+
+// A clean scan has nothing to say, and a notification saying so would be noise.
+const cleanNotifScan = M.parseDoctor(JSON.stringify({
+  mode: "quick", ts: 1700000000,
+  checks: [{ id: "s.ok", category: "system", title: "OS", status: "ok", severity: 0, value: "Omarchy" }]
+}));
+eq("a clean scan produces no notification text", null, M.notificationText(cleanNotifScan));
+eq("a null scan produces no notification text", null, M.notificationText(null));
+eq("a scan with no checks produces no notification text", null, M.notificationText({ checks: [] }));
+
+// Many affected categories must be summarised, not dumped -- a notification is
+// one glance, and the panel has the detail.
+const manyNotif = M.parseDoctor(JSON.stringify({
+  mode: "quick", ts: 1700000000,
+  checks: [
+    { id: "a", category: "network", title: "n", status: "attention", severity: 1, value: "x" },
+    { id: "b", category: "audio", title: "a", status: "attention", severity: 1, value: "x" },
+    { id: "c", category: "storage", title: "s", status: "attention", severity: 1, value: "x" },
+    { id: "d", category: "hyprland", title: "h", status: "attention", severity: 1, value: "x" },
+    { id: "e", category: "services", title: "v", status: "attention", severity: 1, value: "x" }
+  ]
+}));
+const manyNotifText = M.notificationText(manyNotif) || "";
+if (/\+2/.test(manyNotifText)) ok("a notification summarises more than three categories");
+else fail("a notification summarises more than three categories", manyNotifText);
+
+// --------------------------------------------------- optional details + repair
 //
 // details[] and repair are ADDITIVE: a producer that omits them must parse to
 // an empty list / null, and the pre-existing detail/suggestion strings must

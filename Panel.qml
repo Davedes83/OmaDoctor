@@ -31,7 +31,7 @@ Panel {
   property bool scanning: false
   property string lastError: ""
   property string lastMode: "quick"
-  property string pluginVersion: "0.3.0"
+  property string pluginVersion: "0.4.0"
 
   readonly property var checks: scan && Array.isArray(scan.checks) ? scan.checks : []
   readonly property string state: Model.overallState(checks)
@@ -95,7 +95,7 @@ Panel {
     return mode === "full" ? 110 : 85
   }
 
-  function refresh(mode) {
+  function refresh(mode, userInitiated) {
     var requested = mode || "quick"
     if (scanProc.running) {
       // A scan is already in flight. Opening the panel during a quick scan must
@@ -105,6 +105,10 @@ Panel {
       return
     }
     pendingMode = requested
+    // Whether the USER asked for this scan. A notification after a scan someone
+    // just ran restates what is already on screen, so the policy suppresses it.
+    // Panel.open() and the IPC methods pass true; the background timer does not.
+    pendingUserInitiated = userInitiated === true
     scanProc.command = [
       "/usr/bin/timeout", "-k", "2", String(root.budgetFor(requested)),
       "/bin/sh", root.runnerPath,
@@ -117,6 +121,19 @@ Panel {
 
   property string pendingMode: "quick"
   property bool queuedFull: false
+  property bool pendingUserInitiated: false
+
+  // The state as of the last COMPLETED scan, used only to decide whether the
+  // next scan represents a worsening.
+  //
+  // "" means "no baseline yet", which is what makes the very first scan
+  // silent -- there is no transition to report. It is NOT null: QML rejects a
+  // null assignment to a string property outright ("Invalid property
+  // assignment: string expected") and the whole plugin fails to load, which
+  // the editor's diagnostics do not surface. Model.shouldNotify treats "" as a
+  // missing baseline, which weight() degrades to "problem" -- see the note on
+  // Rule 3 in Model.js.
+  property string lastNotifiedState: ""
 
   function onScanFinished(raw) {
     scanning = false
@@ -129,11 +146,33 @@ Panel {
     } else {
       scan = parsed
       lastError = ""
+      root.maybeNotify(parsed)
     }
     if (root.queuedFull) {
       root.queuedFull = false
-      root.refresh("full")
+      root.refresh("full", false)
     }
+  }
+
+  // ------------------------------------------------------------ notification
+  //
+  // The policy lives in Model.js so it is unit-testable; this is only the
+  // plumbing. ShouldNotify fires at most once per WORSENING transition, so a
+  // machine that stays broken notifies once rather than on every 30s poll, and
+  // a machine that gets fixed stays quiet.
+  function maybeNotify(parsed) {
+    var next = Model.overallState(parsed.checks)
+    if (!Model.shouldNotify(root.lastNotifiedState, next,
+          { userInitiated: root.pendingUserInitiated })) {
+      // The baseline still advances even when nothing fires, otherwise a
+      // transition that was suppressed (because the user ran the scan) would
+      // re-fire on the next background poll and announce stale news.
+      root.lastNotifiedState = next
+      return
+    }
+    root.lastNotifiedState = next
+    var body = Model.notificationText(parsed)
+    if (body) root.notify("OmaDoctor", body)
   }
 
   // --------------------------------------------------------------- report
@@ -174,7 +213,7 @@ Panel {
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
 
-    function runFullScan(): void { root.refresh("full") }
+    function runFullScan(): void { root.refresh("full", true) }
 
     function copyReport(): void { root.copyReport() }
 
@@ -283,12 +322,14 @@ Panel {
   Component.onCompleted: refresh("quick")
 
   // Opening the panel is the moment the user is actually looking, so this is
-  // where a full (network-inclusive) scan earns its cost.
+  // where a full (network-inclusive) scan earns its cost. It counts as
+  // user-initiated: they opened the panel to read the result, so a notification
+  // restating it would be noise.
   onOpenedChanged: {
     if (opened) {
       cursorActive = false
       selectedIndex = -1
-      refresh("full")
+      refresh("full", true)
     }
   }
 
@@ -316,7 +357,7 @@ Panel {
 
   function activateCursor() {
     if (!root.cursorActive) return
-    if (root.selectedIndex === 0) root.refresh("full")
+    if (root.selectedIndex === 0) root.refresh("full", true)
     else if (root.selectedIndex === 1) root.copyReport()
   }
 
@@ -331,7 +372,7 @@ Panel {
         (root.issueCount > 0 ? " - " + root.issueCount + " to review" : "")
       : "OmaDoctor - checking..."
     onPressed: function(b) {
-      if (b === Qt.RightButton) root.refresh("full")
+      if (b === Qt.RightButton) root.refresh("full", true)
       else root.toggle()
     }
   }
@@ -425,7 +466,7 @@ Panel {
               foreground: root.foreground
               hasCursor: root.cursorActive && root.selectedIndex === 0
               size: Style.spacing.controlHeight
-              onClicked: root.refresh("full")
+              onClicked: root.refresh("full", true)
             }
 
             PanelActionButton {
