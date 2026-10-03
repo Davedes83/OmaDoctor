@@ -8,6 +8,7 @@
 # systemctl --user. Never restarts a service -- restarting audio is a repair
 # action and is out of scope for this read-only milestone.
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/common.sh"
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/wpctl-parse.sh"
 
 MODE=${1:-}
 CHECKS=""
@@ -43,73 +44,83 @@ fi
 
 # ------------------------------------------------------------- default devices
 if have wpctl; then
-  # wpctl prints the object id on success and a diagnostic line on failure.
-  sink=$(/usr/bin/timeout -k 2 3 wpctl get-default-sink 2>/dev/null | /usr/bin/head -n 1)
-  case "$sink" in
-    '' | *'"'* | *'not found'* | *'No '*)
-      if [ "$pipewire" = "active" ]; then
-        emit "audio.output" audio attention 1 "Default output" "none" \
-          "wpctl returned no default sink" \
-          "No output device selected; pick one in Settings > Sound."
-      else
-        emit "audio.output" audio info 0 "Default output" "unavailable" \
-          "audio server is not running" ""
-      fi
-      ;;
-    *)
-      # Make the numeric id readable: wpctl ids look like "45" or "@DEFAULT_SINK@".
-      case "$sink" in
-        @*) sink_name=$(/usr/bin/timeout -k 2 3 wpctl status 2>/dev/null \
-                       | /usr/bin/grep -F "$sink" | /usr/bin/head -n 1 \
-                       | /usr/bin/sed 's/^[[:space:]]*//; s/\..*//') ;;
-        *)  sink_name=$sink ;;
-      esac
-      emit "audio.output" audio ok 0 "Default output" "${sink_name:-$sink}" \
-        "wpctl default sink" ""
-      ;;
+  # One `wpctl status` call feeds every device lookup. wpctl has no
+  # get-default-sink/get-default-source subcommand -- calling one prints the
+  # usage banner, whose first line is "Usage:", which reads as a device name.
+  wpstatus=$(/usr/bin/timeout -k 2 3 wpctl status 2>/dev/null)
+
+  # A parsed name is only trustworthy alongside a numeric node id, so a partial
+  # or unexpected parse degrades to "unknown" rather than reporting a device.
+  sink_line=$(wp_default_node "$wpstatus" Sinks)
+  sink_id=${sink_line%%	*}
+  sink_name=${sink_line#*	}
+  case "$sink_id" in
+    '' | *[!0-9]*) sink_name="" ;;
   esac
 
-  source=$(/usr/bin/timeout -k 2 3 wpctl get-default-source 2>/dev/null | /usr/bin/head -n 1)
-  case "$source" in
-    '' | *'"'* | *'not found'* | *'No '*)
-      emit "audio.input" audio info 0 "Default input" "none" \
-        "no default source" \
-        "Expected on a desktop without a microphone; harmless if you do not record."
-      ;;
-    *)
-      emit "audio.input" audio ok 0 "Default input" "$source" \
-        "wpctl default source" ""
-      ;;
+  if [ -n "$sink_name" ]; then
+    emit "audio.output" audio ok 0 "Default output" "$sink_name" \
+      "wpctl node $sink_id" ""
+  elif [ "$pipewire" = "active" ]; then
+    emit "audio.output" audio attention 1 "Default output" "none" \
+      "no default sink marked in wpctl status" \
+      "No output device selected; pick one in Settings > Sound."
+  else
+    emit "audio.output" audio info 0 "Default output" "unavailable" \
+      "audio server is not running" ""
+  fi
+
+  # Scoped to the Audio graph: wpctl status also stars the Video graph's camera
+  # source, which is not an audio input.
+  src_line=$(wp_default_node "$wpstatus" Sources)
+  src_id=${src_line%%	*}
+  src_name=${src_line#*	}
+  case "$src_id" in
+    '' | *[!0-9]*) src_name="" ;;
   esac
+
+  if [ -n "$src_name" ]; then
+    emit "audio.input" audio ok 0 "Default input" "$src_name" \
+      "wpctl node $src_id" ""
+  elif [ "$pipewire" = "active" ]; then
+    emit "audio.input" audio info 0 "Default input" "none" \
+      "no default source marked in wpctl status" \
+      "Expected on a desktop without a microphone; harmless if you do not record."
+  else
+    emit "audio.input" audio info 0 "Default input" "unavailable" \
+      "audio server is not running" ""
+  fi
 
   # ----------------------------------------------------------- volume / mute
-  vol=$(/usr/bin/timeout -k 2 3 wpctl get-volume "@DEFAULT_AUDIO_SINK@" 2>/dev/null | /usr/bin/head -n 1)
-  case "$vol" in
-    *VOLUME*)
-      volpct=$(printf '%s' "$vol" | /usr/bin/sed -n 's/.*\([0-9]\{1,3\}\)%.*/\1/p' | /usr/bin/head -n 1)
-      muted=no
-      case "$vol" in *MUTED*) muted=yes ;; esac
-      if [ "$muted" = yes ]; then
-        emit "audio.volume" audio attention 1 "Output volume" "muted" \
-          "sink is muted at ${volpct:-?}%" \
-          "Unmute in Settings > Sound or with the volume key."
-      elif [ -n "$volpct" ] && [ "$volpct" -eq 0 ] 2>/dev/null; then
-        emit "audio.volume" audio attention 1 "Output volume" "0%" \
-          "sink volume is zero" \
-          "Raise the volume; the device is connected but silent."
-      else
-        emit "audio.volume" audio ok 0 "Output volume" "${volpct:-?}%" \
-          "sink responds to volume control" ""
-      fi
-      ;;
-    *)
-      emit "audio.volume" audio info 0 "Output volume" "unknown" \
-        "wpctl get-volume returned nothing" ""
-      ;;
-  esac
+  # wpctl prints a 0..1 float ("Volume: 0.45"); the parser normalises both that
+  # and a percentage form to a percentage.
+  vol=$(/usr/bin/timeout -k 2 3 wpctl get-volume "@DEFAULT_AUDIO_SINK@" 2>/dev/null)
+  volpct=$(wp_vol_pct "$vol")
+  if wp_vol_muted "$vol"; then
+    emit "audio.volume" audio attention 1 "Output volume" "muted" \
+      "sink is muted at ${volpct:-?}%" \
+      "Unmute in Settings > Sound or with the volume key."
+  elif [ -n "$volpct" ] && [ "$volpct" -eq 0 ] 2>/dev/null; then
+    emit "audio.volume" audio attention 1 "Output volume" "0%" \
+      "sink volume is zero" \
+      "Raise the volume; the device is connected but silent."
+  elif [ -n "$volpct" ]; then
+    emit "audio.volume" audio ok 0 "Output volume" "${volpct}%" \
+      "sink responds to volume control" ""
+  elif [ "$pipewire" = "active" ]; then
+    # The server is up but its volume cannot be read: that unreadability is
+    # itself the finding. Reporting "unknown"/info here would present a broken
+    # audio stack as healthy.
+    emit "audio.volume" audio attention 1 "Output volume" "unreadable" \
+      "wpctl get-volume returned no volume (got: ${vol:-nothing})" \
+      "Inspect with: systemctl --user status pipewire wireplumber"
+  else
+    emit "audio.volume" audio info 0 "Output volume" "unknown" \
+      "audio server is not running" ""
+  fi
 
   # ------------------------------------------------------------ device count
-  devs=$(/usr/bin/timeout -k 2 3 wpctl status 2>/dev/null | /usr/bin/grep -cE '^\s+(Sinks|Sources):|Device' || true)
+  devs=$(printf '%s\n' "$wpstatus" | /usr/bin/grep -cE '^[[:space:]]+(Sinks|Sources):|Device' || true)
   case "$devs" in '' | *[!0-9]*) devs=0 ;; esac
   emit "audio.devices" audio info 0 "Devices" "$devs" \
     "entries reported by wpctl status" ""

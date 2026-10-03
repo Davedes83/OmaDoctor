@@ -147,4 +147,30 @@ else
   fail "a silent section is reported as a problem check" "$(printf '%s' "$silent" | head -c 200)"
 fi
 
+# --------------------------------------------------- no fabricated readings
+#
+# wpctl answers an unknown subcommand with a usage banner. An earlier version of
+# the audio section called `wpctl get-default-sink`, which does not exist, and
+# then displayed the banner's first line -- the literal string "Usage:" -- as a
+# healthy default output device. A check that read nothing looked like a check
+# that passed, which is the one outcome this project exists to prevent.
+#
+# So: whatever this machine looks like, no check value may ever be text scraped
+# out of a command's usage/help output.
+fabricated=$(printf '%s' "$SYSINFO" "$AUDIO" "$STORAGE" \
+  | jq -s -r '[.[] | .checks[] | select(
+      (.value | test("(?i)^(usage|commands?|options?|help)")) or
+      (.detail | test("(?i)wpctl \\[OPTION"))
+    )] | length')
+check_eq "no check reports text scraped from a usage banner" "0" "$fabricated"
+
+# The audio defaults must be either a real node name or an explicit unknown --
+# never a bare number that a user cannot act on.
+# $AUDIO is a single JSON document, so -s is not needed (and would make the
+# slurped value a 1-element array, hiding .checks behind it).
+bad_audio=$(printf '%s' "$AUDIO" | jq -r '[.checks[]
+  | select(.id == "audio.output" or .id == "audio.input")
+  | select(.value | test("^[0-9]+$"))] | length')
+check_eq "audio defaults are names, not raw node ids" "0" "$bad_audio"
+
 finish

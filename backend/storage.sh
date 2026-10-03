@@ -63,17 +63,25 @@ case "$_home" in
 esac
 
 # ---------------------------------------------------------------------- inodes
+# Distinguish "df -i could not read this mount" from "this filesystem does not
+# report inode usage". btrfs and zfs answer with "-" for IUse%, which used to be
+# flattened into the same "df -i unavailable" message as a genuine failure --
+# a misleading reason for a check that in fact had nothing to report.
 inode_pct=""
+inode_reason=""
 for m in / "$_home"; do
   [ -n "$m" ] || continue
   [ "$m" = "/" ] || [ "$m" = "$_home" ] || continue
   line=$(/usr/bin/df -P -i "$m" 2>/dev/null | /usr/bin/sed -n '2p')
-  [ -n "$line" ] || continue
+  if [ -z "$line" ]; then
+    inode_reason="df -i could not read $m"
+    continue
+  fi
   # shellcheck disable=SC2086
   set -- $line
   cap=${5-}
   case "$cap" in
-    '' | *[!0-9%]*) ;;
+    '' | *[!0-9%]*) inode_reason="$m does not report inode usage via df -i" ;;
     *) inode_pct=${cap%\%} ;;
   esac
   break
@@ -86,8 +94,14 @@ if [ -n "$inode_pct" ]; then
   severity_for_pct "$inode_pct"
   emit "storage.inodes" storage "$STATUS" "$SEVERITY" "Inodes" \
     "${inode_pct}% used" "small-file capacity" "$SUGGESTION"
+elif [ -n "$inode_reason" ]; then
+  # Not a fault: btrfs and zfs do not track a fixed inode count, so there is no
+  # percentage to report and nothing to act on.
+  emit "storage.inodes" storage info 0 "Inodes" "not reported" \
+    "$inode_reason" ""
 else
-  emit "storage.inodes" storage info 0 "Inodes" "unknown" "df -i unavailable" ""
+  emit "storage.inodes" storage info 0 "Inodes" "unknown" \
+    "df -i unavailable" ""
 fi
 
 # ---------------------------------------------------------------- read-only root
