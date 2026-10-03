@@ -485,4 +485,167 @@ else
   fail "the newest history entry survives the prune" "newest=$newest_after"
 fi
 
+# ------------------------------------------------- regression: fail-closed JSON
+#
+# jstr escaped \ " TAB CR and newline but not 0x01-0x1F or 0x7F. A directory
+# under $HOME containing a control character therefore produced INVALID JSON,
+# so Model.parseDoctor returned null and ALL checks were discarded as "could not
+# read scan output" -- because one odd byte in one check.
+#
+# Uses a throwaway $HOME so nothing real is walked, and removes it after.
+CTL_HOME=$(mktemp -d)
+mkdir -p "$CTL_HOME/plain" "$CTL_HOME/bad$(printf '\006')ctl"
+/usr/bin/dd if=/dev/zero of="$CTL_HOME/bad$(printf '\006')ctl/big" bs=1024 count=300 2>/dev/null
+/usr/bin/dd if=/dev/zero of="$CTL_HOME/plain/big"            bs=1024 count=100 2>/dev/null
+ctl=$(HOME="$CTL_HOME" run "$BACKEND_DIR/storage.sh")
+if printf '%s' "$ctl" | jq -e . >/dev/null 2>&1; then
+  ok "a control character in a directory name still yields valid JSON"
+else
+  fail "a control character in a directory name still yields valid JSON" \
+    "$(printf '%s' "$ctl" | head -c 160)"
+fi
+if printf '%s' "$ctl" | grep -q 'bad\\u0006ctl'; then
+  ok "the control byte is escaped as \\u0006"
+else
+  fail "the control byte is escaped as \\u0006" "$(printf '%s' "$ctl" | head -c 200)"
+fi
+
+# A spaced directory name must survive: du's default output is not
+# whitespace-safe, and $1" "$2 turned "my dir" into the non-existent "~/my".
+SPACE_HOME=$(mktemp -d)
+mkdir -p "$SPACE_HOME/my dir" "$SPACE_HOME/other"
+/usr/bin/dd if=/dev/zero of="$SPACE_HOME/my dir/big" bs=1024 count=300 2>/dev/null
+/usr/bin/dd if=/dev/zero of="$SPACE_HOME/other/big"   bs=1024 count=100 2>/dev/null
+space=$(HOME="$SPACE_HOME" run "$BACKEND_DIR/storage.sh")
+bigdirs=$(printf '%s' "$space" | jq -r '.checks[]|select(.id=="storage.big_dirs")|"\(.value)|\(.detail)"' 2>/dev/null)
+big_value=${bigdirs%%|*}
+big_detail=${bigdirs#*|}
+big_listed=$(printf '%s' "$big_detail" | tr ',' '\n' | grep -c .)
+if printf '%s' "$big_detail" | grep -q 'my dir'; then
+  ok "a directory name containing a space is reported intact"
+else
+  fail "a directory name containing a space is reported intact" "detail='$big_detail'"
+fi
+if [ "$big_value" = "$big_listed entries" ]; then
+  ok "the big-dirs count matches the listing"
+else
+  fail "the big-dirs count matches the listing" "value='$big_value' listed=$big_listed"
+fi
+rm -rf "$CTL_HOME" "$SPACE_HOME"
+
+# jnum must emit only JSON numbers. A glob character class also admits "-", ".",
+# "5.", ".5", "1.2.3", "+5" and "007", none of which is a JSON number.
+jnum_of() { /bin/sh -c '. "$1"; jnum "$2"' _ "$BACKEND_DIR/common.sh" "$1"; }
+check_eq "jnum rejects 1.2.3" "null" "$(jnum_of "1.2.3")"
+check_eq "jnum rejects an empty value" "null" "$(jnum_of "")"
+check_eq "jnum rejects a bare minus" "null" "$(jnum_of "-")"
+check_eq "jnum rejects a leading plus" "null" "$(jnum_of "+5")"
+check_eq "jnum rejects leading zeros" "null" "$(jnum_of "007")"
+check_eq "jnum rejects a trailing dot" "null" "$(jnum_of "5.")"
+check_eq "jnum accepts a negative float" "-2.5" "$(jnum_of "-2.5")"
+check_eq "jnum accepts an exponent" "1e5" "$(jnum_of "1e5")"
+check_eq "jnum accepts zero" "0" "$(jnum_of "0")"
+
+# json_fragment_ok is what stops one bad section from taking the whole scan
+# down. Each of these shapes was reachable and each broke the merge.
+frag() {
+  /bin/sh -c '. "$1"; if json_fragment_ok "$2"; then echo OK; else echo BAD; fi' \
+    _ "$BACKEND_DIR/common.sh" "$1"
+}
+check_eq "json_fragment_ok accepts one object" "OK" "$(frag '{"id":"a"}')"
+check_eq "json_fragment_ok accepts two objects" "OK" "$(frag '{"id":"a"},{"id":"b"}')"
+check_eq "json_fragment_ok accepts a nested array field" "OK" "$(frag '{"id":"a","d":[1,2]}')"
+check_eq "json_fragment_ok accepts a nested object field" "OK" "$(frag '{"id":"a","r":{"t":"safe"}}')"
+check_eq "json_fragment_ok rejects truncation" "BAD" "$(frag '{"id":"a"},{"id":"b","cat')"
+check_eq "json_fragment_ok rejects a nested array element" "BAD" "$(frag '[]')"
+check_eq "json_fragment_ok rejects a spliced document" "BAD" "$(frag '{"section":"x","checks":[]}')"
+check_eq "json_fragment_ok rejects a trailing comma" "BAD" "$(frag '{"id":"a"},')"
+check_eq "json_fragment_ok rejects an unclosed string" "BAD" "$(frag '{"id":"a')"
+check_eq "json_fragment_ok rejects an element with no id" "BAD" "$(frag '{"title":"a"}')"
+
+# ------------------------------------------------- regression: dead compositor
+#
+# hyprctl 0.56.2 answers a STALE HYPRLAND_INSTANCE_SIGNATURE with
+# "Couldn't connect to .../.socket.sock. (4)" on STDOUT and exit 4. The banner
+# guard matched none of that and the exit status was discarded, so a healthy
+# machine was told its display was off, complete with a repair hint.
+stale=$(HYPRLAND_INSTANCE_SIGNATURE=deadbeef timeout -k 2 30 /bin/sh "$BACKEND_DIR/display.sh" 2>/dev/null)
+stale_outs=$(printf '%s' "$stale" | jq -r '.checks[]|select(.id=="display.outputs")|"\(.status)|\(.value)"' 2>/dev/null)
+case "$stale_outs" in
+  info\|*) ok "a stale compositor signature reports unknown, not a dead display" ;;
+  *) fail "a stale compositor signature reports unknown, not a dead display" "got '$stale_outs'" ;;
+esac
+stale_problems=$(printf '%s' "$stale" | jq -r '[.checks[]|select(.status=="problem")]|length' 2>/dev/null)
+check_eq "a stale compositor signature produces no severity-3 findings" "0" "$stale_problems"
+stale_cfg=$(HYPRLAND_INSTANCE_SIGNATURE=deadbeef timeout -k 2 30 /bin/sh "$BACKEND_DIR/hyprland.sh" 2>/dev/null \
+  | jq -r '.checks[]|select(.id=="hyprland.config_errors")|.status' 2>/dev/null)
+check_eq "a socket error is not reported as a configuration error" "info" "$stale_cfg"
+
+# ------------------------------------------------ regression: unavailable probes
+#
+# memory, swap and latency each had `if ...; then ...; fi` with no else, so the
+# check VANISHED when its probe was unavailable -- and a vanished check is
+# indistinguishable from a passing one in the summary counts.
+for id in system.memory system.swap system.updates; do
+  present=$(printf '%s' "$QUICK" | jq -r --arg i "$id" '[.checks[]|select(.id==$i)]|length' 2>/dev/null)
+  check_eq "the quick scan emits $id even when its probe cannot answer" "1" "$present"
+done
+lat=$(printf '%s' "$FULL" | jq -r '[.checks[]|select(.id=="network.latency")]|length' 2>/dev/null)
+check_eq "the full scan emits network.latency even when ICMP is blocked" "1" "$lat"
+
+# audio.devices counted wpctl's SECTION HEADERS as if they were hardware.
+dev_val=$(printf '%s' "$QUICK" | jq -r '.checks[]|select(.id=="audio.devices")|.value' 2>/dev/null)
+dev_hdr=$(wpctl status 2>/dev/null | grep -cE '^[[:space:]]*(Sinks|Sources|Devices):' || printf 0)
+if [ "$dev_val" = "$dev_hdr" ]; then
+  fail "audio.devices counts devices, not section headers" "reported $dev_val, headers=$dev_hdr"
+else
+  ok "audio.devices counts devices, not section headers"
+fi
+
+# A UTF-8 device name must survive the wpctl parser. Deleting every byte outside
+# 0x20-0x7E turned "DT 770 Pro (80 Ω)" into "DT 770 Pro (80 )" and still
+# reported it as healthy.
+. "$BACKEND_DIR/wpctl-parse.sh"
+utf8=$(printf 'Audio\n \342\224\224 Sinks:\n \342\224\202  *   58. DT 770 Pro (80 \316\237)  [vol: 0.45]\n' > /tmp/omadoctor-wp-utf8.$$ ; wp_default_node "$(cat /tmp/omadoctor-wp-utf8.$$)" Sinks; rm -f /tmp/omadoctor-wp-utf8.$$)
+case "$utf8" in
+  *"(80 "*) ok "a non-ASCII device name survives wpctl parsing" ;;
+  *) fail "a non-ASCII device name survives wpctl parsing" "got '$utf8'" ;;
+esac
+
+# hypr_clean_multiline must PRESERVE newlines. Its first version used
+# \000-\037, which includes 0x0A, so it flattened the document onto one line and
+# every line-oriented parser downstream saw no monitor blocks at all -- which is
+# why it sat unused.
+. "$BACKEND_DIR/hyprctl-parse.sh"
+# hypr_clean_multiline takes its text as an ARGUMENT, not on stdin.
+hc_out=$(hypr_clean_multiline "$(printf 'Monitor eDP-1 (ID 0):\n 1920x1080@60.00')" | wc -l | tr -d ' ')
+if [ "$hc_out" -ge 2 ]; then
+  ok "hypr_clean_multiline preserves line structure"
+else
+  fail "hypr_clean_multiline preserves line structure" "lines=$hc_out"
+fi
+hc_ctl=$(hypr_clean_multiline "$(printf 'a\006b')" | od -An -c | tr -d ' \n')
+case "$hc_ctl" in
+  *006*) fail "hypr_clean_multiline strips control bytes" "got '$hc_ctl'" ;;
+  *) ok "hypr_clean_multiline strips control bytes" ;;
+esac
+
+# ------------------------------------------------- regression: checkupdates cost
+#
+# checkupdates SYNCS THE PACMAN DATABASE over the network, so running it in the
+# quick scan -- which runs on a timer and is documented as local-only -- made
+# the dominant cost of every poll a network round trip plus a db-lock risk.
+cu=$(printf '%s' "$QUICK" | jq -r '.checks[]|select(.id=="system.updates")|.value' 2>/dev/null)
+check_eq "the quick scan does not sync the pacman database" "not checked" "$cu"
+cuf=$(printf '%s' "$FULL" | jq -r '.checks[]|select(.id=="system.updates")|.value' 2>/dev/null)
+if [ "$cuf" = "not checked" ]; then
+  fail "the full scan does check for updates" "got '$cuf'"
+else
+  ok "the full scan does check for updates"
+fi
+
+# The new workspace check, which uses the parser that already existed unused.
+ws=$(printf '%s' "$QUICK" | jq -r '[.checks[]|select(.id=="hyprland.workspaces")]|length' 2>/dev/null)
+check_eq "the scan emits a workspaces check" "1" "$ws"
+
 finish
