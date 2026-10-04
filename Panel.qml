@@ -961,15 +961,17 @@ Panel {
     root.aiConfirmOpened = false
   }
 
-  // A short, safe preview of what will be sent. The prompt is multi-kilobyte;
-  // the point is for the user to recognise it, not to read it. Shown through
-  // the SAME redactor as the report, so the preview cannot leak what the report
-  // itself would not.
+  // The text that will be sent, IN FULL, put through the SAME redactor as the
+  // report so the preview cannot leak what the report itself would not.
+  //
+  // Deliberately NOT truncated. This used to slice to 300 chars, and the preview
+  // box capped its own height at 150px, so the report could not actually be read
+  // -- which defeats the entire point of a consent screen. The sheet now scrolls
+  // (see the Flickable around this text), so the whole prompt is reachable
+  // rather than hidden behind an ellipsis.
   readonly property string aiPreview: {
     if (!root.aiPendingPrompt) return ""
-    var r = Model.redact(root.aiPendingPrompt, root.redactInfo)
-    if (r.length > 300) r = r.slice(0, 300) + "..."
-    return r
+    return Model.redact(root.aiPendingPrompt, root.redactInfo)
   }
 
   property string aiPendingPrompt: ""
@@ -1092,8 +1094,17 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(420))
-    contentHeight: panel.fittedContentHeight(body.implicitHeight)
+    // WIDER and TALLER while the sheet is up. A diagnostic report is a
+    // fixed-width, 52-column monospace document; rendered at 420px in the
+    // caption font it was not legible, and a consent screen you cannot read is
+    // not consent. The sheet inside scrolls, so the extra height buys readable
+    // lines rather than more lines. fittedContentWidth/Height cap both to the
+    // screen, so this degrades safely on a small display rather than
+    // overflowing it.
+    contentWidth: panel.fittedContentWidth(
+      root.aiConfirmOpened ? Style.space(760) : Style.space(420))
+    contentHeight: panel.fittedContentHeight(
+      root.aiConfirmOpened ? Style.space(560) : body.implicitHeight)
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -1105,143 +1116,21 @@ Panel {
       onCloseRequested: root.aiConfirmOpened ? root.cancelAi() : root.close()
       onTabRequested: function(direction) { if (!root.aiConfirmOpened) root.switchPanel(direction) }
 
-      // ------------------------------------------------- Ask AI confirmation
-      //
-      // A modal over the panel, because this is the one action that can send
-      // data off the machine. It states the exact command that will run, shows
-      // a preview of the text that will be sent, and offers three ways out:
-      // send it, copy it instead, or cancel.
-      // BorderSurface, not Rectangle: `borderSpec` is a BorderSurface property,
-      // and assigning it to a plain Rectangle is "Cannot assign to non-existent
-      // property" -- which fails the whole widget load and silently removes the
-      // plugin from the bar with nothing but one journal line to show for it.
-      BorderSurface {
-        id: aiSheet
-        anchors.fill: parent
-        visible: root.aiConfirmOpened
-        color: Util.alpha(Color.background, 0.94)
-        borderSpec: Border.flat(root.accent, Style.normalBorderWidth)
-        radius: Style.cornerRadius
-
-        FocusScope {
-          anchors.fill: parent
-          focus: visible
-          Keys.onPressed: function(event) {
-            if (event.key === Qt.Key_Escape) { root.cancelAi(); event.accepted = true; return }
-            if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-              root.runAi(); event.accepted = true; return
-            }
-            if (event.text === "c") { root.copyAiPrompt(); root.cancelAi(); event.accepted = true }
-          }
-
-          Column {
-            anchors.fill: parent
-            anchors.margins: Style.space(16)
-            spacing: Style.spacing.md
-
-            Text {
-              width: parent.width
-              text: "Send this report to your AI?"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.title
-              font.bold: true
-            }
-
-            Text {
-              width: parent.width
-              text: "Command:  " + root.resolvedAiCommand
-              color: root.accent
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              wrapMode: Text.WrapAnywhere
-              elide: Text.ElideRight
-              maximumLineCount: 2
-            }
-
-            Text {
-              width: parent.width
-              text: root.resolvedAiCommand.indexOf("ollama ") === 0
-                ? "A LOCAL model runs this. Nothing leaves your machine."
-                : "This sends the redacted report to a remote provider. Read it before you continue."
-              color: root.resolvedAiCommand.indexOf("ollama ") === 0
-                ? root.foreground : root.urgent
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
-
-            BorderSurface {
-              width: parent.width
-              height: Math.min(Style.space(150), aiPreviewText.implicitHeight + Style.space(12))
-              color: Util.alpha(root.foreground, 0.06)
-              radius: Style.cornerRadius
-              borderSpec: Border.flat(Util.alpha(root.foreground, 0.15), 1)
-
-              Text {
-                id: aiPreviewText
-                anchors.fill: parent
-                anchors.margins: Style.space(6)
-                text: root.aiPreview
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WrapAnywhere
-                elide: Text.ElideRight
-              }
-            }
-
-            Text {
-              width: parent.width
-              text: "Enter sends   ·   c copies the prompt instead   ·   Esc cancels"
-              color: Qt.darker(root.foreground, 1.4)
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
-
-            Item { width: 1; height: 0 }
-
-            Row {
-              width: parent.width
-              spacing: Style.spacing.sm
-
-              Button {
-                width: Math.max(1, (parent.width - Style.spacing.sm * 2) / 3)
-                text: "Send"
-                bordered: true
-                foreground: root.foreground
-                accent: root.accent
-                fontSize: Style.font.bodySmall
-                onClicked: root.runAi()
-              }
-              Button {
-                width: Math.max(1, (parent.width - Style.spacing.sm * 2) / 3)
-                text: "Copy"
-                bordered: true
-                foreground: root.foreground
-                accent: root.accent
-                fontSize: Style.font.bodySmall
-                onClicked: { root.copyAiPrompt(); root.cancelAi() }
-              }
-              Button {
-                width: Math.max(1, (parent.width - Style.spacing.sm * 2) / 3)
-                text: "Cancel"
-                bordered: true
-                foreground: root.foreground
-                accent: root.accent
-                fontSize: Style.font.bodySmall
-                onClicked: root.cancelAi()
-              }
-            }
-          }
-        }
-      }
-
       Flickable {
         id: scroll
         width: parent.width
         height: parent.height
+        // Hidden while the Ask AI sheet is up. The sheet paints over this area
+        // (it is declared LAST in this keyCatcher -- see below), but a Flickable
+        // underneath a visible overlay still accepts drags, and the FindingRow
+        // MouseAreas still fire hover, so the body could be scrolled and
+        // highlight-lit from behind a modal.
+        //
+        // Safe for sizing: both this Flickable's contentHeight and the panel's
+        // own contentHeight bind to body.implicitHeight, which does not depend
+        // on this item's `visible` -- so the panel does not resize when the
+        // sheet opens or closes.
+        visible: !root.aiConfirmOpened
         contentHeight: body.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
@@ -1486,6 +1375,220 @@ Panel {
                 width: parent.width
                 visible: modelData.kind === "check"
                 rowData: modelData
+              }
+            }
+          }
+        }
+      }
+
+      // ------------------------------------------------- Ask AI confirmation
+      //
+      // A modal over the panel, because this is the one action that can send
+      // data off the machine. It states the exact command that will run, shows
+      // a preview of the text that will be sent, and offers three ways out:
+      // send it, copy it instead, or cancel.
+      // BorderSurface, not Rectangle: `borderSpec` is a BorderSurface property,
+      // and assigning it to a plain Rectangle is "Cannot assign to non-existent
+      // property" -- which fails the whole widget load and silently removes the
+      // plugin from the bar with nothing but one journal line to show for it.
+      //
+      // It MUST stay the LAST child of this keyCatcher. QML paints siblings in
+      // declaration order, so with the sheet declared before the Flickable the
+      // body painted straight over it: both fill the same rect (anchors.fill
+      // here, width/height = parent on the Flickable), so the sheet's text and
+      // the hero/findings text interleaved into an unreadable overlap instead
+      // of one opaque modal covering the other.
+      BorderSurface {
+        id: aiSheet
+        anchors.fill: parent
+        visible: root.aiConfirmOpened
+        // FULLY OPAQUE, and on the popup surface rather than Color.background.
+        //
+        // Util.alpha(c, a) SETS alpha to a -- it does not multiply -- so the
+        // previous Util.alpha(Color.background, 0.94) meant 6% of whatever was
+        // behind the sheet showed through, and on a bright wallpaper that
+        // bleed-through was plainly readable as ghosting behind the prompt.
+        //
+        // Color.popups.background is what the card underneath is painted with
+        // (see PopupCard: `color: Color.popups.background`), so using it makes
+        // the seam between sheet and card invisible. The alpha is forced to 1
+        // on top of that, because a theme may set popups.background-alpha below
+        // 1.0 for the card's sake -- but a consent dialog must not be see-through
+        // whatever the theme says.
+        color: Util.alpha(Color.popups.background, 1.0)
+        borderSpec: Border.flat(root.accent, Style.normalBorderWidth)
+        radius: Style.cornerRadius
+
+        FocusScope {
+          anchors.fill: parent
+          // root.aiConfirmOpened, NOT the bare `visible` identifier. Inside this
+          // binding, `visible` resolves to the FocusScope's OWN visible property
+          // -- which is never assigned, so it is a constant true. That left the
+          // sheet's key handler (Esc / Enter / c) permanently live rather than
+          // scoped to "sheet is showing".
+          focus: root.aiConfirmOpened
+          Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_Escape) { root.cancelAi(); event.accepted = true; return }
+            if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+              root.runAi(); event.accepted = true; return
+            }
+            if (event.text === "c") { root.copyAiPrompt(); root.cancelAi(); event.accepted = true }
+          }
+
+          // Header pinned top, actions pinned bottom, and the REPORT in the
+          // scrollable space between them.
+          //
+          // This was one Column sized to the card, and it broke two ways: the
+          // preview box clamped its own height to 150px, so the report was cut
+          // off mid-line with no way to reach the rest of it, and the column
+          // could grow taller than the card, laying the footer and the three
+          // buttons out BELOW the card's bottom border, floating over the
+          // desktop. Pinning the ends and giving the middle its own Flickable
+          // fixes both, and means the actions stay reachable no matter how long
+          // the report is.
+          //
+          // Nothing here depends on an implicitHeight, which matters: the
+          // card's size is decided by the KeyboardPanel's contentWidth and
+          // contentHeight above, and the previous version reached back up into
+          // that binding for an id this sheet no longer had.
+          Item {
+            id: aiSheetBody
+            anchors.fill: parent
+            anchors.margins: Style.space(16)
+
+            Column {
+              id: aiHeader
+              anchors.top: parent.top
+              anchors.left: parent.left
+              anchors.right: parent.right
+              spacing: Style.spacing.sm
+
+              Text {
+                width: parent.width
+                text: "Send this report to your AI?"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                font.bold: true
+              }
+
+              Text {
+                width: parent.width
+                text: "Command:  " + root.resolvedAiCommand
+                color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WrapAnywhere
+                elide: Text.ElideRight
+                maximumLineCount: 2
+              }
+
+              Text {
+                width: parent.width
+                text: root.resolvedAiCommand.indexOf("ollama ") === 0
+                  ? "A LOCAL model runs this. Nothing leaves your machine."
+                  : "This sends the redacted report to a remote provider. Read it before you continue."
+                color: root.resolvedAiCommand.indexOf("ollama ") === 0
+                  ? root.foreground : root.urgent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
+
+            // Exactly what will leave the machine. This is the whole point of
+            // the sheet, so it takes all the space the header and the actions
+            // do not need, and scrolls.
+            //
+            // Anchored between the two rather than sized from its text: on a
+            // small display fittedContentHeight caps the card, and this simply
+            // gets shorter instead of pushing the buttons off the bottom.
+            BorderSurface {
+              id: aiPreviewBox
+              anchors.top: aiHeader.bottom
+              anchors.topMargin: Style.spacing.md
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.bottom: aiFooter.top
+              anchors.bottomMargin: Style.spacing.md
+              color: Util.alpha(root.foreground, 0.06)
+              radius: Style.cornerRadius
+              borderSpec: Border.flat(Util.alpha(root.foreground, 0.15), 1)
+              clip: true
+
+              Flickable {
+                id: aiPreviewScroll
+                anchors.fill: parent
+                anchors.margins: Style.space(6)
+                contentHeight: aiPreviewText.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+
+                Text {
+                  id: aiPreviewText
+                  width: aiPreviewScroll.width
+                  text: root.aiPreview
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  // One step up from caption. The card is now wide enough that
+                  // the report's 52-column rule fits on one line without
+                  // wrapping, so the only thing standing between the reader and
+                  // a legible document was the size of the type.
+                  font.pixelSize: Style.font.bodySmall
+                  // WordWrap, NOT WrapAnywhere. The report is monospace with
+                  // deliberate column alignment; breaking mid-token is what
+                  // destroys the only thing that makes it readable.
+                  wrapMode: Text.WordWrap
+                }
+              }
+            }
+
+            Text {
+              id: aiFooter
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.bottom: aiActions.top
+              anchors.bottomMargin: Style.spacing.sm
+              text: "Enter sends   ·   c copies the prompt instead   ·   Esc cancels"
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Row {
+              id: aiActions
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.bottom: parent.bottom
+              spacing: Style.spacing.sm
+
+              Button {
+                width: Math.max(1, (parent.width - Style.spacing.sm * 2) / 3)
+                text: "Send"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                fontSize: Style.font.bodySmall
+                onClicked: root.runAi()
+              }
+              Button {
+                width: Math.max(1, (parent.width - Style.spacing.sm * 2) / 3)
+                text: "Copy"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                fontSize: Style.font.bodySmall
+                onClicked: { root.copyAiPrompt(); root.cancelAi() }
+              }
+              Button {
+                width: Math.max(1, (parent.width - Style.spacing.sm * 2) / 3)
+                text: "Cancel"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                fontSize: Style.font.bodySmall
+                onClicked: root.cancelAi()
               }
             }
           }
