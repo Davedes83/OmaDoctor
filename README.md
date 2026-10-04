@@ -1,6 +1,14 @@
 <a href='https://ko-fi.com/O3N726LJT4' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi5.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
 # OmaDoctor
 
+[![Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FDavedes83%2FOmaDoctor%2Fmaster%2Fmanifest.json&query=%24.version&label=version&color=blue)](https://github.com/Davedes83/OmaDoctor/blob/master/manifest.json)
+[![Omarchy](https://img.shields.io/badge/omarchy-4.0%2B-blue)](https://omarchy.com)
+[![Quickshell](https://img.shields.io/badge/quickshell-QML-brightgreen)](https://quickshell.org)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-linux-lightgrey)](https://omarchy.com)
+
+[![Install](https://img.shields.io/badge/install-omarchy%20plugin%20add-brightgreen)](https://github.com/Davedes83/OmaDoctor#installing)
+
 A diagnostics panel for [Omarchy](https://omarchy.dev). It runs read-only health
 checks across system, audio, storage and network, explains what each finding
 means, and produces a redacted report you can paste into a bug report.
