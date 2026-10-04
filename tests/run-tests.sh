@@ -54,7 +54,10 @@ for suite in "$DIR"/*-tests.sh; do
   # stdin from /dev/null: a suite that accidentally reads stdin must not block
   # waiting on the terminal.
   if [ -n "$SUITE_OPT" ]; then
-    "$SUITE_INTERP" "$SUITE_OPT" "$suite" </dev/null || RC=1
+    # Word-split the option words: "$SUITE_OPT" quoted would pass
+    # "--posix --noprofile" as ONE argv (the interpreter rejects it).
+    # shellcheck disable=SC2086
+    "$SUITE_INTERP" $SUITE_OPT "$suite" </dev/null || RC=1
   else
     "$SUITE_INTERP" "$suite" </dev/null || RC=1
   fi

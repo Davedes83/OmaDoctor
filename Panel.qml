@@ -55,10 +55,10 @@ Panel {
 
   // The id of the finding row the pointer is over, or "" for none.
   //
-  // Deliberately NOT part of the keyboard cursor model: rowCount stays 2, so
-  // the arrow keys still walk only the two action buttons and Enter activates
-  // them. Findings are hover-highlighted only, which is the whole premium win
-  // without turning every finding into a tab stop.
+  // Deliberately NOT part of the keyboard cursor model: rowCount covers only
+  // the three action buttons, so the arrow keys still walk just those and
+  // Enter activates them. Findings are hover-highlighted only, which is the
+  // whole premium win without turning every finding into a tab stop.
   //
   // A single id (rather than a per-row flag) is what guarantees the kit's "one
   // highlight at a time" contract -- two rows can never claim the cursor.
@@ -181,10 +181,10 @@ Panel {
     scanProc.running = true
     scanning = true
     // lastRawJson is deliberately NOT cleared here: it feeds buildReport while
-    // the rescan runs. The failure path below uses scanGotOutput instead, which
-    // is per-scan -- lastRawJson is stale after any earlier success and cannot
-    // tell "this scan produced nothing" from "a previous one succeeded".
-    scanProc.gotOutput = false
+    // the rescan runs. The failure path below uses scanProc.finished instead,
+    // which is per-scan -- lastRawJson is stale after any earlier success and
+    // cannot tell "this scan produced nothing" from "a previous one succeeded".
+    scanProc.finished = false
   }
 
   property string pendingMode: "quick"
@@ -603,11 +603,16 @@ Panel {
     // which is the difference between "could not read scan output" and a message
     // a user can act on.
     property string stderrText: ""
-    property bool gotOutput: false
+    // Per-scan "onScanFinished already ran" latch. stdout's collector and
+    // onExited both want to finish the scan; whichever gets there first wins,
+    // the other stands down -- otherwise an empty-output failure ran
+    // onScanFinished twice and the second call clobbered the useful message.
+    property bool finished: false
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        scanProc.gotOutput = true
+        if (scanProc.finished) return
+        scanProc.finished = true
         root.lastRawJson = root.capText(text)
         root.onScanFinished(text, undefined, scanProc.stderrText)
       }
@@ -626,7 +631,8 @@ Panel {
       // onStreamFinished normally gets here first; if the process died without
       // producing stdout, finish the scan so queuedFull is honoured and the UI
       // reports the failure instead of waiting.
-      if (!scanProc.gotOutput) {
+      if (!scanProc.finished) {
+        scanProc.finished = true
         root.onScanFinished("", exitCode, scanProc.stderrText)
       }
     }
@@ -935,10 +941,14 @@ Panel {
       // Nothing installed that this plugin knows how to drive. Do not silently
       // do nothing: hand over the prompt so the feature still works with
       // whatever the user actually has.
-      root.copyText(root.askAiPrompt())
-      root.notify("OmaDoctor",
-        "No supported AI CLI found -- the prompt is on your clipboard.",
-        Model.glyph("attention"), "normal")
+      if (root.copyText(root.askAiPrompt()))
+        root.notify("OmaDoctor",
+          "No supported AI CLI found -- the prompt is on your clipboard.",
+          Model.glyph("attention"), "normal")
+      else
+        root.notify("OmaDoctor",
+          "No supported AI CLI found, and the clipboard is busy -- the prompt was not copied.",
+          Model.glyph("attention"), "normal")
       return
     }
     root.aiPendingPrompt = root.askAiPrompt()
@@ -947,7 +957,9 @@ Panel {
 
   // The no-send path: always available, works with any assistant at all.
   function copyAiPrompt() {
-    root.copyText("Ask AI about these OmaDoctor findings:\n\n" + root.askAiPrompt())
+    if (!root.copyText("Ask AI about these OmaDoctor findings:\n\n" + root.askAiPrompt()))
+      root.notify("OmaDoctor", "Clipboard is busy with the previous copy -- try again in a moment.",
+        Model.glyph("attention"), "normal")
   }
 
   // copyText(text) -> the clipboard, via one guarded stdin writer.
@@ -1033,14 +1045,15 @@ Panel {
       if (answer === "") answer = "(the assistant returned nothing)"
       // Saved and copied: the file so it can be reopened or attached to an
       // issue, the clipboard because that is where the user is looking.
-      root.saveAiAnswer(answer)
-      root.copyText(answer)
+      var saved = root.saveAiAnswer(answer)
+      var copied = root.copyText(answer)
       root.notify("OmaDoctor",
-        exitCode === 0
-          ? "AI answer copied and saved to " + root.aiAnswerPath
-          : "AI exited " + exitCode + " -- output copied anyway",
-        Model.glyph(exitCode === 0 ? "ok" : "attention"),
-        exitCode === 0 ? "normal" : "critical")
+        (copied ? "AI answer copied" : "Could not copy the answer (clipboard busy)") +
+        (saved ? " and saved to " + root.aiAnswerPath
+               : "; could not save (previous save still running)") +
+        (exitCode === 0 ? "" : " -- AI exited " + exitCode + ", output used anyway"),
+        Model.glyph(exitCode === 0 && copied && saved ? "ok" : "attention"),
+        exitCode === 0 && copied && saved ? "normal" : "critical")
     }
   }
 
@@ -1063,10 +1076,11 @@ Panel {
   }
 
   function saveAiAnswer(text) {
-    if (aiSaveProc.running) return
+    if (aiSaveProc.running) return false
     aiSaveProc.command = ["/usr/bin/tee", root.aiAnswerPath]
     aiSaveProc.pending = String(text || "") + "\n"
     aiSaveProc.running = true
+    return true
   }
 
   // ---------------------------------------------------------- the bar icon

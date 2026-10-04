@@ -78,7 +78,10 @@ run_interp() {
     *\ *)
       _interp=${OMC_TEST_SH%% *}
       _opt=${OMC_TEST_SH#* }
-      "$_interp" "$_opt" "$@"
+      # Word-split the option words: "$_opt" quoted would pass
+      # "--posix --noprofile" as ONE argv.
+      # shellcheck disable=SC2086
+      "$_interp" $_opt "$@"
       ;;
     *)
       "$OMC_TEST_SH" "$@"

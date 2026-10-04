@@ -79,8 +79,9 @@ Inside the panel:
 - `Esc` closes, `Tab` moves to the next panel, `j`/`k` and the arrow keys move
   between the actions, `Enter` activates.
 
-The bar shows the current state as a glyph and re-runs a quick scan every 30
-seconds so the icon is current even when you never open the panel.
+The bar shows the current state as a glyph. It can also re-run a quick scan in
+the background (`pollSeconds`) so the icon stays current even when you never
+open the panel. That poll defaults to off.
 
 ### Keyboard shortcut
 
@@ -126,7 +127,8 @@ differs between the two working forms: `<omarchy-shell> shell <method>` versus
 `qs ipc ... call <target> <method>`.
 
 Available plugin methods: `runFullScan`, `copyReport`, `state` (returns the
-panel's live state as JSON), plus `open`, `close`, `show`, `hide` and `toggle`.
+panel's live state as JSON), `askAi`, `copyAiPrompt`, plus `open`, `close`,
+`show`, `hide` and `toggle`.
 
 ## Ask AI
 
