@@ -225,7 +225,7 @@ function diffScans(before, after) {
   // id of "__proto__" (the inherited setter) and an unrecorded own shadow for
   // "toString", so the removal loop below read an inherited truthy value,
   // skipped its increment, and undercounted `same`.
-  var seen = {}
+  var seen = Object.create(null)
   for (var i = 0; i < a.checks.length; i++) {
     var now = a.checks[i]
     var id = str(now.id)
@@ -501,9 +501,9 @@ function byCategory(checks) {
   // it is connected to, then what makes noise. Any category not listed here
   // sorts last, then alphabetically, so a new section appears predictably
   // without needing a line added here first.
-  var order = ["system", "services", "hyprland", "network", "audio", "storage",
-               "bluetooth", "boot"],
-    seen = {}, buckets = []
+  var order = ["system", "services", "hyprland", "display", "network", "audio",
+               "storage", "bluetooth", "boot"],
+    seen = Object.create(null), buckets = []
   var list = eachReal(checks)
   if (!Array.isArray(checks)) return buckets
 
@@ -644,9 +644,9 @@ function redact(text, opts) {
   s = s.replace(/\/media\/[A-Za-z0-9._-]+/g, "/media/<volume>");
   s = s.replace(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g, "<uuid>");
   s = s.replace(/\b([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-)\d{4}-/g, "$1<uuid>-");
-  // 16-hex uppercase is the NTFS/volume-serial convention; an explicit
-  // "serial" label covers hdparm/lsblk/udev output in any width.
-  s = s.replace(/\b([0-9A-F]{16})\b/g, "<serial>");
+  // 16 hex digits, upper- or lowercase, is the NTFS/volume-serial convention;
+  // an explicit "serial" label covers hdparm/lsblk/udev output in any width.
+  s = s.replace(/\b([0-9A-Fa-f]{16})\b/g, "<serial>");
   // An explicit "serial" label. Two forms, because they are genuinely
   // different in practice: with punctuation (hdparm "serial: X", udev
   // "SERIAL=X") the label is unambiguous; without it (prose "serial X") the
@@ -776,7 +776,7 @@ function redact(text, opts) {
   // ---------------------------------------------------------------- paths
   // /root belongs to the same person as $HOME for every practical purpose in a
   // report, and o.home does not cover it.
-  s = s.replace(/\/root(?=\/|\b)/g, "~")
+  s = s.replace(/(^|[^0-9A-Za-z._\/-])\/root(?=\/|$)/g, "$1~")
 
   return s
 }

@@ -161,7 +161,10 @@ Panel {
       // A scan is already in flight. Opening the panel during a quick scan must
       // still end up with the network section, so remember the upgrade and
       // honour it once the current scan lands rather than dropping it.
-      if (requested === "full") queuedFull = true
+      if (requested === "full") {
+        queuedFull = true
+        queuedUserInitiated = userInitiated === true
+      }
       return
     }
     pendingMode = requested
@@ -177,10 +180,16 @@ Panel {
     ]
     scanProc.running = true
     scanning = true
+    // lastRawJson is deliberately NOT cleared here: it feeds buildReport while
+    // the rescan runs. The failure path below uses scanGotOutput instead, which
+    // is per-scan -- lastRawJson is stale after any earlier success and cannot
+    // tell "this scan produced nothing" from "a previous one succeeded".
+    scanProc.gotOutput = false
   }
 
   property string pendingMode: "quick"
   property bool queuedFull: false
+  property bool queuedUserInitiated: false
   property bool pendingUserInitiated: false
 
   // The state as of the last COMPLETED scan, used only to decide whether the
@@ -317,7 +326,9 @@ Panel {
     // stuck true so the next panel open ran an unrequested second full scan.
     if (root.queuedFull) {
       root.queuedFull = false
-      root.refresh("full", false)
+      var queuedUser = root.queuedUserInitiated
+      root.queuedUserInitiated = false
+      root.refresh("full", queuedUser)
     }
   }
 
@@ -337,7 +348,7 @@ Panel {
   function maybeNotify(parsed) {
     var next = Model.overallState(parsed.checks)
     if (!Model.shouldNotify(root.lastNotifiedState, next,
-          { userInitiated: root.pendingUserInitiated })) {
+          { userInitiated: root.pendingUserInitiated || root.queuedFull })) {
       // The baseline still advances even when nothing fires, otherwise a
       // transition that was suppressed (because the user ran the scan) would
       // re-fire on the next background poll and announce stale news.
@@ -592,9 +603,11 @@ Panel {
     // which is the difference between "could not read scan output" and a message
     // a user can act on.
     property string stderrText: ""
+    property bool gotOutput: false
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        scanProc.gotOutput = true
         root.lastRawJson = root.capText(text)
         root.onScanFinished(text, undefined, scanProc.stderrText)
       }
@@ -613,7 +626,7 @@ Panel {
       // onStreamFinished normally gets here first; if the process died without
       // producing stdout, finish the scan so queuedFull is honoured and the UI
       // reports the failure instead of waiting.
-      if (root.lastRawJson === "") {
+      if (!scanProc.gotOutput) {
         root.onScanFinished("", exitCode, scanProc.stderrText)
       }
     }
@@ -785,14 +798,13 @@ Panel {
       var line = root.aiCandidates[i]
       var bin = line.split(" ")[0]
       if (!root.aiOnPath[bin]) continue
-      // ollama has no "use the default model" mode, so the model has to be
-      // named. Without one configured, skip it rather than guess.
-      if (bin === "ollama") {
-        if (root.aiModel === "") continue
-        return "ollama run " + root.aiModel
-      }
       return line
     }
+    // ollama is probed for, but unlike the candidates above it has no
+    // "use the default model" mode, so it can only be selected when a
+    // model has been configured. Without one, skip it rather than guess.
+    if (root.aiOnPath["ollama"] && root.aiModel !== "")
+      return "ollama run " + root.aiModel
     return ""
   }
 
@@ -802,7 +814,7 @@ Panel {
     for (var i = 0; i < root.aiCandidates.length; i++) {
       lines.push(root.aiCandidates[i].split(" ")[0])
     }
-    if (root.aiOnPath["ollama"]) lines.push("ollama")
+    lines.push("ollama")
     // one "which" per distinct binary, run sequentially so the fork cost is a
     // single short burst at startup rather than ten at once
     var queue = []
@@ -1111,7 +1123,7 @@ Panel {
       anchors.fill: parent
       // While the AI confirmation is up, the panel's own cursor must not move
       // and Enter must not start another scan. The overlay handles its own keys.
-      onMoveRequested: function(dx, dy) { if (!root.aiConfirmOpened) root.moveCursor(dy) }
+      onMoveRequested: function(dx, dy) { if (!root.aiConfirmOpened) root.moveCursor(dx !== 0 ? dx : dy) }
       onActivateRequested: if (!root.aiConfirmOpened) root.activateCursor()
       onCloseRequested: root.aiConfirmOpened ? root.cancelAi() : root.close()
       onTabRequested: function(direction) { if (!root.aiConfirmOpened) root.switchPanel(direction) }
