@@ -656,6 +656,43 @@ else
   ok "the root filesystem mount option is actually read"
 fi
 
+# A writable root is the normal state of a desktop, so it once sat in the
+# default arm of the case as attention 1. Every healthy machine therefore
+# finished on ATTENTION with nothing actionable in it, and a scan that always
+# says ATTENTION is a scan whose ATTENTION gets ignored. Neither rw nor ro may
+# exceed severity 0; only an unreadable mount option may.
+root_sev=$(printf '%s' "$QUICK" | jq -r '.checks[]|select(.id=="storage.root_writable")|.severity' 2>/dev/null)
+if [ -n "$root_sev" ] && [ "$root_sev" -le 0 ] 2>/dev/null; then
+  ok "the root filesystem check never raises a severity"
+else
+  fail "the root filesystem check never raises a severity" "severity=$root_sev"
+fi
+
+# The ro/rw flag is the first field, and it has to be matched as a whole field.
+# A substring glob for *ro* also matched options that merely contained those
+# letters, so "rw,errors=remount-ro" was reported as a read-only root -- the
+# worst outcome, since it inverts the finding. Assert the verdict, not just the
+# severity: a string with no ro/rw field is honestly "unknown", not "read-only".
+for case_ in \
+  "ro|ro" \
+  "rw|ro,noatime,compress=zstd:3,ssd,space_cache=v2,subvol=/@|rw" \
+  "rw,errors=remount-ro|rw" \
+  "errors=remount-ro|unknown"
+do
+  opts=${case_%%|*}
+  want=${case_##*|}
+  got=${opts%%,*}
+  case "$got" in
+    ro | rw) got=$got ;;
+    *) got=unknown ;;
+  esac
+  if [ "$got" = "$want" ]; then
+    ok "ro/rw is matched as a field, not a substring: $opts"
+  else
+    fail "ro/rw is matched as a field, not a substring: $opts" "got '$got', want '$want'"
+  fi
+done
+
 # The new workspace check, which uses the parser that already existed unused.
 ws=$(printf '%s' "$QUICK" | jq -r '[.checks[]|select(.id=="hyprland.workspaces")]|length' 2>/dev/null)
 check_eq "the scan emits a workspaces check" "1" "$ws"

@@ -121,7 +121,14 @@ _root_opts=$(/usr/bin/findmnt -no OPTIONS / 2>/dev/null)
 # slashes and an at-sign are all normal, so the guard has to be a positive
 # whitelist rather than a "contains a non-letter" test, which rejected every
 # real value and reported the root filesystem as unknown.
-case "$(printf '%s' "$_root_opts" | /usr/bin/tr -d '\n\r')" in
+#
+# A writable root is reported as ok, never attention. It is the normal state of a
+# desktop -- the kernel writes /var, /run, /tmp and the logs -- so flagging it
+# meant every healthy machine finished a scan on ATTENTION, which is the one
+# word a reader is meant to act on. There is no desktop configuration in which
+# "writable" is actionable, so there is nothing to suggest.
+_root_flat=$(printf '%s' "$_root_opts" | /usr/bin/tr -d '\n\r')
+case "$_root_flat" in
   '')
     emit "storage.root_writable" storage info 0 "Root filesystem" "unknown" \
       "findmnt did not report options for /" ""
@@ -130,14 +137,25 @@ case "$(printf '%s' "$_root_opts" | /usr/bin/tr -d '\n\r')" in
     emit "storage.root_writable" storage info 0 "Root filesystem" "unknown" \
       "findmnt reported an unrecognised option string" ""
     ;;
-  *ro*)
-    emit "storage.root_writable" storage ok 0 "Root filesystem" "read-only" \
-      "/ is mounted read-only" ""
-    ;;
+  # The ro/rw flag is the first field of the vfs option list, so match that
+  # field exactly. A substring glob for *ro* across the whole option string also
+  # matched any option merely containing those two letters -- errors=remount-ro
+  # being the realistic case -- and called the root read-only.
   *)
-    emit "storage.root_writable" storage attention 1 "Root filesystem" "writable" \
-      "/ is mounted rw" \
-      "Expected for a desktop root filesystem; confirm this is intentional."
+    case "${_root_flat%%,*}" in
+      ro)
+        emit "storage.root_writable" storage ok 0 "Root filesystem" "read-only" \
+          "/ is mounted read-only" ""
+        ;;
+      rw)
+        emit "storage.root_writable" storage ok 0 "Root filesystem" "writable" \
+          "/ is mounted rw, which is normal for a desktop root filesystem" ""
+        ;;
+      *)
+        emit "storage.root_writable" storage info 0 "Root filesystem" "unknown" \
+          "findmnt reported no ro/rw flag for /" ""
+        ;;
+    esac
     ;;
 esac
 
