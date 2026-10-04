@@ -317,19 +317,61 @@ degrades a single check to `unknown` rather than breaking the scan.
 omarchy plugin add https://github.com/Davedes83/OmaDoctor.git --enable
 ```
 
-Or manually:
+That clones the plugin, adds it to your bar, and writes the entry into your
+`~/.config/omarchy/shell.json` for you. It will ask which bar section to use and
+pre-selects **right**, which is where Omarchy's own system widgets live. There is
+nothing else to do.
+
+In a script, or anywhere without a TTY, pass `--yes` to accept that default
+non-interactively — without it the command refuses rather than assuming:
+
+```sh
+omarchy plugin add https://github.com/Davedes83/OmaDoctor.git --enable --yes
+```
+
+To update later:
+
+```sh
+omarchy plugin update davedes.omadoctor
+```
+
+### Manual install
+
+If you would rather manage the clone yourself:
 
 ```sh
 git clone https://github.com/Davedes83/OmaDoctor.git \
   ~/.config/omarchy/plugins/davedes.omadoctor
 omarchy-shell shell rescanPlugins
+omarchy plugin enable davedes.omadoctor --section right
 ```
 
-Then add it to the right-hand side of your bar in `~/.config/omarchy/shell.json`:
+The directory name does not have to match the `id` — discovery reads each
+folder's `manifest.json`, so any folder name works. Use `davedes.omadoctor`
+anyway to match what `omarchy plugin add` creates and what
+`omarchy plugin enable` expects as its argument.
+
+`omarchy-shell shell rescanPlugins` is only needed on the manual path; the
+`omarchy plugin add` path already does it for you.
+
+To enable it by hand instead, add it to the right-hand side of your bar in
+`~/.config/omarchy/shell.json`:
 
 ```json
 { "bar": { "layout": { "right": [{ "id": "davedes.omadoctor" }] } } }
 ```
+
+### If the bar icon does not appear
+
+Check it is enabled and actually placed:
+
+```sh
+omarchy plugin list
+jq '.bar.layout' ~/.config/omarchy/shell.json
+```
+
+An entry in `shell.json` is not enough on its own — the widget must sit in one of
+`left`, `center` or `right`, and the section you chose is where it will render.
 
 ## The check contract
 
