@@ -634,7 +634,7 @@ function redact(text, opts) {
   // ------------------------------------------- storage identifiers FIRST
   // These run before the MAC rules because a UUID and a volume serial are full
   // of hex that the separator-based MAC patterns also match: masking the MACs
-  // first turned "/mnt/c30f4f52-994d-4076-b4cd-5edb0d09e6ef" into
+  // first turned "/mnt/3f8a1c2e-7d4b-4e6a-9b3c-2a5f0e8d7c11" into
   // "/mnt/<volume><uuid>b4cd-<mac>", which is both wrong and no less revealing.
   //
   // A filesystem UUID or a disk serial is a stable hardware fingerprint, and on

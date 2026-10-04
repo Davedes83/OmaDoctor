@@ -254,9 +254,9 @@ eq("redact masks a bare 12-hex MAC", "<mac>", M.redact("3cf0c917b2ac", {}));
 eq("redact masks a filesystem UUID", "uuid <uuid>",
   M.redact("uuid 550e8400-e29b-41d4-a716-446655440000", {}));
 eq("redact masks a /mnt volume path", "/mnt/<volume>",
-  M.redact("/mnt/c30f4f52-994d-4076-b4cd-5edb0d09e6ef", {}));
+  M.redact("/mnt/3f8a1c2e-7d4b-4e6a-9b3c-2a5f0e8d7c11", {}));
 eq("redact masks an NTFS volume serial", "/mnt/<volume>",
-  M.redact("/mnt/D62476C62476A8DF", {}));
+  M.redact("/mnt/A1B2C3D4E5F60718", {}));
 eq("redact masks a labelled disk serial", "serial: <serial>",
   M.redact("serial: S6B2NJ0T902341", {}));
 eq("redact masks a disk serial with no punctuation after the label", "serial <serial>",
@@ -355,8 +355,8 @@ const leakScan = {
       suggestion: "compare against 1.1.1.1" },
     { id: "storage.mount", category: "storage", title: "Data volume",
       status: "attention", severity: 1, value: "82% used",
-      detail: "/mnt/D62476C62476A8DF and /home/dave/.config",
-      repair: { tier: "caution", label: "free space on mybox (/mnt/c30f4f52-994d-4076-b4cd-5edb0d09e6ef)",
+      detail: "/mnt/A1B2C3D4E5F60718 and /home/dave/.config",
+      repair: { tier: "caution", label: "free space on mybox (/mnt/3f8a1c2e-7d4b-4e6a-9b3c-2a5f0e8d7c11)",
                 detail: "owned by dave; serial S6B2NJ0T902341" } },
     { id: "hyprland.config_errors", category: "hyprland", title: "Configuration",
       status: "problem", severity: 3, value: "1 error(s)",
@@ -376,7 +376,7 @@ const leakReport = M.buildReport(leakScan, {
   // Every one of these is an identifier that MUST NOT survive.
   const leaks = [
     "192.168.10.1", "mybox", "dave", "aa:bb:cc:dd:ee:ff", "aabb.ccdd.eeff",
-    "wlp3s0", "eno1", "Dave 5G", "D62476C62476A8DF", "c30f4f52-994d-4076-b4cd-5edb0d09e6ef",
+    "wlp3s0", "eno1", "Dave 5G", "A1B2C3D4E5F60718", "3f8a1c2e-7d4b-4e6a-9b3c-2a5f0e8d7c11",
     "S6B2NJ0T902341", "/home/dave"
   ]
     .filter((needle) => leakReport.includes(needle));
