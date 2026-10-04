@@ -1173,13 +1173,15 @@ Panel {
             foreground: root.foreground
             fontFamily: root.fontFamily
             title: root.ready ? Model.stateLabel(root.state) : "Checking..."
-            meta: root.ready
-              ? root.totals.total + " checks - " +
-                (root.issueCount > 0 ? root.issueCount + " need attention" : "nothing to review")
-              : "running first scan"
+            meta: root.scanning
+              ? "scanning…"
+              : (root.ready
+                ? root.totals.total + " checks - " +
+                  (root.issueCount > 0 ? root.issueCount + " need attention" : "nothing to review")
+                : "running first scan")
             detail: root.ready
-              ? "checked " + Model.fmtAge(Number(root.scan.ts || 0), root.nowSec) +
-                " - " + (root.lastMode === "full" ? "full scan" : "quick scan")
+              ? Model.fmtAge(Number(root.scan.ts || 0), root.nowSec) +
+                (root.lastMode === "full" ? " · full" : " · quick")
               : ""
             iconComponent: Component {
               Text {
@@ -1225,9 +1227,8 @@ Panel {
           PanelSeparator { width: parent.width; foreground: root.foreground }
 
           // ------------------------------------------------- action buttons
-          // Labelled Buttons rather than icon-only PanelActionButtons. Two
-          // bare icons read as utilitarian; naming the two actions is what makes
-          // them obvious without a tooltip round-trip.
+          // Labelled Buttons rather than icon-only PanelActionButtons. Three
+          // labelled buttons read as obvious actions without a tooltip round-trip.
           //
           // Emphasis is a LOW-ALPHA accent tint, never a solid accent fill:
           // Button paints its own label in `foreground`, and this theme has
@@ -1235,11 +1236,34 @@ Panel {
           // invisible (light text on light background). The tint separates the
           // primary without fighting the label.
           Row {
+            id: actionRow
             spacing: Style.spacing.sm
             width: parent.width
 
+            // A QML Row gives every child its implicitWidth and puts whatever
+            // is left over at the TRAILING edge, so a full-width Row still ends
+            // with dead space after the last button. Sharing the leftover fixes
+            // that, and shares it in PROPORTION to each button's natural width
+            // rather than splitting it into equal thirds: "Run full diagnosis"
+            // needs ~180px and "Ask AI" needs ~90px, so equal thirds would clip
+            // the first label's text while handing the third button slack it
+            // cannot use.
+            //
+            // slack is clamped at 0. A theme with a larger font can push the
+            // three natural widths past the row; in that case the buttons keep
+            // their natural size and overflow exactly as they did before,
+            // rather than every label being squeezed into a too-small box.
+            readonly property real naturalTotal:
+              fullButton.implicitWidth + copyButton.implicitWidth + aiButton.implicitWidth
+            readonly property real slack: Math.max(0, width - naturalTotal - spacing * 2)
+            // Share of the leftover this button's natural width represents.
+            function share(of) {
+              return slack * (of / Math.max(1, naturalTotal))
+            }
+
             Button {
               id: fullButton
+              width: implicitWidth + actionRow.share(implicitWidth)
               iconText: "󰃬"
               text: "Run full diagnosis"
               tooltipText: "Run full diagnosis (includes network)"
@@ -1256,6 +1280,7 @@ Panel {
 
             Button {
               id: copyButton
+              width: implicitWidth + actionRow.share(implicitWidth)
               iconText: "󰅏"
               text: "Copy report"
               tooltipText: "Copy redacted report"
@@ -1272,6 +1297,7 @@ Panel {
 
             Button {
               id: aiButton
+              width: implicitWidth + actionRow.share(implicitWidth)
               iconText: "󰚩"
               text: "Ask AI"
               tooltipText: root.resolvedAiCommand !== ""
@@ -1286,23 +1312,6 @@ Panel {
               horizontalPadding: Style.spacing.controlPaddingX - Style.space(2)
               verticalPadding: Style.spacing.controlPaddingY - Style.space(1)
               onClicked: root.askAi()
-            }
-
-            // Fill whatever horizontal space the two labelled buttons leave,
-            // whatever their theme-driven widths turn out to be. The old fixed
-            // subtraction (two 22px icon buttons) would now overflow the Row.
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              width: Math.max(0, parent.width
-                     - fullButton.width - copyButton.width - aiButton.width
-                     - Style.spacing.sm * 3)
-              text: root.scanning
-                ? "scanning..."
-                : (root.ready ? "last checked " + Model.fmtAge(Number(root.scan.ts || 0), root.nowSec) : "")
-              color: Qt.darker(root.foreground, 1.4)
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
             }
           }
 
