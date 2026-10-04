@@ -780,7 +780,7 @@ Panel {
   // This list is a convenience, not a contract. Anything not in it works
   // through the askAiCommand setting, which takes a full command line.
   readonly property var aiCandidates: [
-    "opencode run",        // reads the prompt on stdin when given no argument
+    "opencode",            // interactive TUI; given the report via --prompt
     "mods -s",
     "llm -s",
     "aichat",
@@ -975,10 +975,44 @@ Panel {
     if (argv.length === 0) return
     root.aiConfirmOpened = false
     root.aiRunning = true
-    aiProc.command = argv
-    aiProc.pending = root.aiPendingPrompt
-    aiProc.output = ""
-    aiProc.running = true
+    // Stage the prompt on disk: the AI runs in a terminal, not a hidden pipe,
+    // so its stdin comes from the terminal itself. The file path therefore has
+    // to be the hand-off, never argv (world-readable in /proc).
+    aiPromptProc.command = ["/usr/bin/tee", root.aiPromptPath]
+    aiPromptProc.pending = root.aiPendingPrompt
+    aiPromptProc.running = true
+  }
+
+  // Launch the AI as an interactive program: its TUI/REPL needs a terminal
+  // window, so it opens in the user's default terminal and runs there directly.
+  // The staged prompt file is the hand-off, so the report never appears in
+  // argv (world-readable in /proc).
+  function launchAiInTerminal() {
+    var argv = root.splitCommand(root.resolvedAiCommand)
+    if (argv.length === 0) { root.aiRunning = false; return }
+    var bin = String(argv[0]).split("/").pop()
+    var script
+    if (bin === "opencode") {
+      // opencode's TUI cannot take the prompt on stdin; --prompt is its
+      // documented pre-loaded prompt. Point it at the staged file so the
+      // report itself never lands in argv either.
+      argv = ["opencode", "--prompt",
+              "Read the diagnostic report in \"" + root.aiPromptPath +
+              "\" and carry out its instructions in full."]
+      script = null
+    } else {
+      var esc = String(root.aiPromptPath).replace(/(["\\$`])/g, "\\$1")
+      script = '"$@" < "' + esc + '"'
+    }
+    var cmd = script !== null
+      ? ["/bin/sh", "-c", script, "sh"].concat(argv)
+      : argv
+    aiLaunchProc.command = ["/usr/share/omarchy/bin/omarchy-launch-terminal"].concat(cmd)
+    aiLaunchProc.running = true
+    root.aiRunning = false
+    root.notify("OmaDoctor",
+      "Sent the report to " + root.resolvedAiCommand + ".",
+      Model.glyph("ok"), "normal")
   }
 
   function cancelAi() {
@@ -1002,6 +1036,7 @@ Panel {
   property bool aiConfirmOpened: false
   property bool aiRunning: false
   readonly property string aiAnswerPath: root.stateDir + "/ai-answer.txt"
+  readonly property string aiPromptPath: root.stateDir + "/ai-prompt.txt"
 
   // Also inherits the environment, and this is deliberate for the same reason.
   // An assistant CLI needs the things the hardened environment deliberately
@@ -1015,72 +1050,37 @@ Panel {
   // anything except a click or an explicit IPC call that still opens the
   // confirmation sheet.
   Process {
-    id: aiProc
-    // The prompt goes on stdin, never in argv: argv is world-readable in
-    // /proc, and the prompt carries the user's machine details.
-    stdinEnabled: true
-    // An assistant with web search enabled can take minutes. This is not the
-    // scan budget; it is a separate, much longer deadline.
-    property string pending: ""
-    property string output: ""
-    onStarted: {
-      if (aiProc.pending !== "") aiProc.write(aiProc.pending)
-      // Read to EOF, or the assistant never sees the prompt.
-      aiProc.stdinEnabled = false
-    }
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: aiProc.output += String(text || "")
-    }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: aiProc.output += String(text || "")
-    }
-    onExited: function(exitCode) {
-      if (aiProc.stdinEnabled === false) aiProc.stdinEnabled = true
-      aiProc.pending = ""
-      root.aiRunning = false
-      var answer = String(aiProc.output || "").trim()
-      aiProc.output = ""
-      if (answer === "") answer = "(the assistant returned nothing)"
-      // Saved and copied: the file so it can be reopened or attached to an
-      // issue, the clipboard because that is where the user is looking.
-      var saved = root.saveAiAnswer(answer)
-      var copied = root.copyText(answer)
-      root.notify("OmaDoctor",
-        (copied ? "AI answer copied" : "Could not copy the answer (clipboard busy)") +
-        (saved ? " and saved to " + root.aiAnswerPath
-               : "; could not save (previous save still running)") +
-        (exitCode === 0 ? "" : " -- AI exited " + exitCode + ", output used anyway"),
-        Model.glyph(exitCode === 0 && copied && saved ? "ok" : "attention"),
-        exitCode === 0 && copied && saved ? "normal" : "critical")
-    }
-  }
-
-  // Written with tee rather than FileView: no plugin in this shell writes
-  // through FileView, whereas Process is already the proven path here.
-  Process {
-    id: aiSaveProc
+    id: aiPromptProc
     clearEnvironment: true
     environment: root.trustedEnv()
     stdinEnabled: true
     property string pending: ""
     onStarted: {
-      if (aiSaveProc.pending !== "") aiSaveProc.write(aiSaveProc.pending)
-      aiSaveProc.stdinEnabled = false
+      if (aiPromptProc.pending !== "") aiPromptProc.write(aiPromptProc.pending)
+      aiPromptProc.stdinEnabled = false
     }
     onExited: function(exitCode) {
-      if (aiSaveProc.stdinEnabled === false) aiSaveProc.stdinEnabled = true
-      aiSaveProc.pending = ""
+      if (aiPromptProc.stdinEnabled === false) aiPromptProc.stdinEnabled = true
+      aiPromptProc.pending = ""
+      if (exitCode !== 0) {
+        root.aiRunning = false
+        root.notify("OmaDoctor",
+          "Could not stage the report for the AI (tee exited " + exitCode + ").",
+          Model.glyph("problem"), "critical")
+        return
+      }
+      root.launchAiInTerminal()
     }
   }
 
-  function saveAiAnswer(text) {
-    if (aiSaveProc.running) return false
-    aiSaveProc.command = ["/usr/bin/tee", root.aiAnswerPath]
-    aiSaveProc.pending = String(text || "") + "\n"
-    aiSaveProc.running = true
-    return true
+  // The AI itself. Deliberately NOT the hardened environment (see above) --
+  // the user's assistant needs their real PATH, credentials and config.
+  Process {
+    id: aiLaunchProc
+    onExited: function() {
+      // omarchy-launch-terminal setsids the terminal away, so this exits
+      // immediately after spawning; nothing to report.
+    }
   }
 
   // ---------------------------------------------------------- the bar icon

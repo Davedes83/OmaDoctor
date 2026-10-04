@@ -161,8 +161,10 @@ Then **Send**, **Copy** (puts the prompt on the clipboard instead, for pasting
 into anything), or **Esc**. If no supported CLI is found it says so and copies
 the prompt rather than doing nothing.
 
-The answer is written to `~/.local/state/omadoctor/ai-answer.txt` and put on
-the clipboard.
+On **Send** the assistant launches as its own application (via `setsid
+uwsm-app`, so it is a first-class process of your session, not a child of your
+terminal), with the redacted prompt on its stdin. The prompt and the AI's best
+optional output log live under `~/.local/state/omadoctor/`.
 
 ### Settings
 
