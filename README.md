@@ -1,3 +1,4 @@
+<a href='https://ko-fi.com/O3N726LJT4' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi5.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
 # OmaDoctor
 
 A diagnostics panel for [Omarchy](https://omarchy.dev). It runs read-only health
@@ -7,6 +8,9 @@ means, and produces a redacted report you can paste into a bug report.
 It is deliberately **not** another system monitor. It does not graph anything or
 sit there collecting history. It answers one question: *what is wrong with this
 machine right now, and what do I do about it?*
+
+<img width="561" height="370" alt="preview" src="https://github.com/user-attachments/assets/fd75e49b-5209-4ad4-bbf5-c85e530f1043" />
+<img width="868" height="672" alt="screenshot-2026-10-04_14-25-37" src="https://github.com/user-attachments/assets/5d468ea0-c7ea-4b9e-838b-ae97023976c3" />
 
 ## What it checks
 
