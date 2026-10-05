@@ -91,6 +91,9 @@ check_eq "0..1 float becomes a percentage" "45" "$(wp_vol_pct 'Volume: 0.45')"
 check_eq "an explicit percentage passes through" "45" "$(wp_vol_pct 'Volume: 45%')"
 check_eq "full scale is 100" "100" "$(wp_vol_pct 'Volume: 1.0')"
 check_eq "silence is 0" "0" "$(wp_vol_pct 'Volume: 0.00')"
+# Over-amplified sinks print a float above 1.0. The float form is always scaled,
+# so 1.52 is 152%, never "2%" (which is what a `v <= 1.0` guard produced).
+check_eq "an over-amplified float scales past 100" "152" "$(wp_vol_pct 'Volume: 1.52')"
 check_eq "mute does not disturb the percentage" "45" \
   "$(wp_vol_pct 'Volume: 0.45 [MUTED]')"
 

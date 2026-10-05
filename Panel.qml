@@ -129,7 +129,11 @@ Panel {
   // would freeze the moment the scan stops changing and the age readout could
   // never age. This timer keeps it moving.
   property int clockSec: Math.floor(Date.now() / 1000)
-  readonly property int nowSec: Math.max(root.clockSec, scan ? Number(scan.ts || 0) : 0)
+  // The age readout's "now" is just the ticking clock. It deliberately does NOT
+  // clamp up to scan.ts: if a scan's timestamp is skewed into the future, that
+  // clamp pinned now to ts and the readout sat on "just now" for the whole skew.
+  // fmtAge already treats now < ts as "just now" and now == ts as "0s ago".
+  readonly property int nowSec: root.clockSec
 
   // ------------------------------------------------------------- scanning
   //
@@ -184,6 +188,15 @@ Panel {
     // the rescan runs. The failure path below uses scanProc.finished instead,
     // which is per-scan -- lastRawJson is stale after any earlier success and
     // cannot tell "this scan produced nothing" from "a previous one succeeded".
+    //
+    // Everything else IS reset: a Process keeps its collected streams between
+    // runs, so without this the next scan's tryFinish() could pass the previous
+    // scan's stdout/stderr to onScanFinished before the new collectors fire.
+    scanProc.stdoutText = ""
+    scanProc.stderrText = ""
+    scanProc.stdoutDone = false
+    scanProc.stderrDone = false
+    scanProc.exitCode = 0
     scanProc.finished = false
   }
 
@@ -224,20 +237,27 @@ Panel {
   // location has nothing to do with where user state belongs.
   readonly property string stateDir: (Quickshell.env("HOME") || "") + "/.local/state/omadoctor"
 
-  // Newest history entry, picked up once at startup. Declared as a property
-  // rather than constructed inside the function -- that is the shell's own
-  // idiom (see Commons/Color.qml), and a FileView built in a function body has
-  // no stable parent to load against.
-  //
+  // The newest history entry is found by listing the directory, NOT with a
+  // FileView. FileView reads a single file and exposes no directory listing
+  // (it has no count/itemAt/fileName), so the old historyDirView.count was
+  // always undefined and this seeding never ran: "what changed" was silently
+  // blind after every shell restart, exactly when a user most wants to know
+  // what moved. A one-shot Process lists the directory through the same
+  // hardened spawner; reading the chosen file stays a FileView, which is what
+  // the type is actually for.
+  Process {
+    id: historyListProc
+    clearEnvironment: true
+    environment: root.trustedEnv()
+    command: ["/usr/bin/ls", "-1", root.stateDir + "/history"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.pickBaseline(text)
+    }
+  }
   // printErrors is off because a missing history directory on a first run is a
   // normal state, not something to shout about: a diagnostic tool must never be
   // the reason the panel misbehaves.
-  property FileView historyDirView: FileView {
-    id: historyDirView
-    path: root.stateDir + "/history"
-    watchChanges: false
-    printErrors: false
-  }
   property FileView baselineFileView: FileView {
     id: baselineFileView
     path: ""
@@ -256,11 +276,15 @@ Panel {
   // and status from the baseline side (titles and values come from the current
   // scan), so no other fields are needed.
   function loadBaselineFromHistory() {
+    historyListProc.running = true
+  }
+
+  function pickBaseline(listing) {
     var newest = ""
     var newestTs = -1
-    var n = historyDirView.count
-    for (var i = 0; i < n; i++) {
-      var name = historyDirView.itemAt(i).fileName
+    var lines = String(listing || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var name = lines[i].replace(/[\r\n]+/g, "").trim()
       // Only <epoch>.json. Skips the .tmp.$$ file an in-flight write leaves.
       if (!/^[0-9]+\.json$/.test(name)) continue
       var ts = parseInt(name, 10)
@@ -602,24 +626,44 @@ Panel {
     // writes before those redirections, plus the timeout's own diagnostics --
     // which is the difference between "could not read scan output" and a message
     // a user can act on.
+    property string stdoutText: ""
     property string stderrText: ""
-    // Per-scan "onScanFinished already ran" latch. stdout's collector and
-    // onExited both want to finish the scan; whichever gets there first wins,
-    // the other stands down -- otherwise an empty-output failure ran
-    // onScanFinished twice and the second call clobbered the useful message.
+    // Per-scan "onScanFinished already ran" latch. stdout's collector, stderr's
+    // collector and onExited all race to finish the scan; whichever gets there
+    // with BOTH streams still wins, the others stand down -- otherwise an
+    // empty-output failure ran onScanFinished twice and the second call
+    // clobbered the useful message.
     property bool finished: false
+    property bool stdoutDone: false
+    property bool stderrDone: false
+    property int exitCode: 0
+    // Finish only once BOTH collectors have delivered EOF. Finishing on stdout
+    // alone handed onScanFinished whatever stderr happened to hold at that
+    // instant -- often the PREVIOUS scan's text, since a Process's collected
+    // stream is not cleared between runs. That turned a transient failure into
+    // a message naming the wrong cause.
+    function tryFinish() {
+      if (scanProc.finished) return
+      if (!scanProc.stdoutDone || !scanProc.stderrDone) return
+      scanProc.finished = true
+      root.lastRawJson = scanProc.stdoutText
+      root.onScanFinished(scanProc.stdoutText, scanProc.exitCode, scanProc.stderrText)
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (scanProc.finished) return
-        scanProc.finished = true
-        root.lastRawJson = root.capText(text)
-        root.onScanFinished(text, undefined, scanProc.stderrText)
+        scanProc.stdoutText = root.capText(text)
+        scanProc.stdoutDone = true
+        scanProc.tryFinish()
       }
     }
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: scanProc.stderrText = root.capText(text)
+      onStreamFinished: {
+        scanProc.stderrText = root.capText(text)
+        scanProc.stderrDone = true
+        scanProc.tryFinish()
+      }
     }
     // scanning was cleared ONLY from onStreamFinished. If the collector never
     // fires -- the Process cannot spawn at all, the command array is malformed,
@@ -628,13 +672,13 @@ Panel {
     // file: copyProc had an onExited and scanProc did not.
     onExited: function(exitCode) {
       root.scanning = false
-      // onStreamFinished normally gets here first; if the process died without
-      // producing stdout, finish the scan so queuedFull is honoured and the UI
-      // reports the failure instead of waiting.
-      if (!scanProc.finished) {
-        scanProc.finished = true
-        root.onScanFinished("", exitCode, scanProc.stderrText)
-      }
+      scanProc.exitCode = exitCode
+      // A collector that never fires must not strand the scan on "scanning...".
+      // onExited normally arrives after both streams have drained; forcing the
+      // flags here only matters when one of them produced no EOF at all.
+      scanProc.stdoutDone = true
+      scanProc.stderrDone = true
+      scanProc.tryFinish()
     }
   }
 
@@ -957,6 +1001,13 @@ Panel {
 
   // The no-send path: always available, works with any assistant at all.
   function copyAiPrompt() {
+    // Gated on `ready` exactly like askAi(): with no scan, askAiPrompt() is
+    // empty and this would copy a prompt with no report in it.
+    if (!root.ready) {
+      root.notify("OmaDoctor", "No scan yet -- run a diagnosis first.",
+        Model.glyph("info"), "normal")
+      return
+    }
     if (!root.copyText("Ask AI about these OmaDoctor findings:\n\n" + root.askAiPrompt()))
       root.notify("OmaDoctor", "Clipboard is busy with the previous copy -- try again in a moment.",
         Model.glyph("attention"), "normal")
@@ -1135,8 +1186,13 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      // While the AI confirmation is up, the panel's own cursor must not move
-      // and Enter must not start another scan. The overlay handles its own keys.
+      // While the AI sheet is up, hand keys straight to it. PanelKeyCatcher uses
+      // Keys.priority: BeforeItem and consumes Return/Enter/Space itself, so the
+      // guards below are not enough: the sheet's FocusScope never saw Enter and
+      // "Enter sends" did nothing. `blocked` is the shell's own idiom for an
+      // inline editor (see GalleryPanel): the catcher forwards keys without
+      // emitting signals so the focused descendant handles them.
+      blocked: root.aiConfirmOpened
       onMoveRequested: function(dx, dy) { if (!root.aiConfirmOpened) root.moveCursor(dx !== 0 ? dx : dy) }
       onActivateRequested: if (!root.aiConfirmOpened) root.activateCursor()
       onCloseRequested: root.aiConfirmOpened ? root.cancelAi() : root.close()

@@ -48,8 +48,7 @@ elif [ "$pipewire" = "unknown" ] || [ "$wplumber" = "unknown" ]; then
   # contradicts three times over ("pipewire=unknown ..."). Every other section
   # degrades an unreadable probe to info; audio must not be the outlier.
   emit "audio.server" audio info 0 "Audio server" "unknown" "$server_detail" \
-    "The user session did not answer systemctl --user" \
-    "Expected outside a logged-in desktop session"
+    "The user session did not answer systemctl --user. Expected outside a logged-in desktop session"
 else
   emit "audio.server" audio problem 3 "Audio server" "not running" "$server_detail" \
     "Audio will not work at all. Restart it with: systemctl --user restart pipewire wireplumber"

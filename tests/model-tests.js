@@ -253,6 +253,11 @@ eq("redact masks a bare 12-hex MAC", "<mac>", M.redact("3cf0c917b2ac", {}));
 // named by exactly these.
 eq("redact masks a filesystem UUID", "uuid <uuid>",
   M.redact("uuid 550e8400-e29b-41d4-a716-446655440000", {}));
+// A malformed/truncated UUID must still be masked in FULL. The old rule kept
+// the first two groups and only replaced the middle, leaving 12 hex chars of a
+// hardware fingerprint in a report designed to be pasted publicly.
+eq("redact masks a truncated UUID in full", "<uuid>",
+  M.redact("abcdef01-2345-6789-abcd", {}));
 eq("redact masks a /mnt volume path", "/mnt/<volume>",
   M.redact("/mnt/3f8a1c2e-7d4b-4e6a-9b3c-2a5f0e8d7c11", {}));
 eq("redact masks an NTFS volume serial", "/mnt/<volume>",
@@ -282,6 +287,13 @@ eq("redact masks a wlp interface name", "<iface> is up",
 // hides nothing while appearing to.
 eq("redact masks a full-length wlp interface name", "<iface> <iface>",
   M.redact("enp7s0 wlp0s20f3", {}));
+// wlx* is MAC-derived: the interface name itself embeds the MAC, and the
+// bare-12-hex rule cannot see it because there is no word boundary inside the
+// token -- so masking the whole name is the only thing that hides the MAC.
+eq("redact masks a wlx (MAC-derived) interface name", "<iface>",
+  M.redact("wlx001122334455", {}));
+eq("redact masks a wwan interface name", "<iface> is up",
+  M.redact("wwan0 is up", {}));
 eq("redact does not eat an ordinary word beginning with a prefix", "ethereal",
   M.redact("ethereal", {}));
 
@@ -1120,7 +1132,12 @@ eq("severity 1 outranks a healthy status", M.overallState([{ id: "a", status: "o
 eq("severity 0 does not outrank a problem status", M.overallState([{ id: "a", status: "problem", severity: 0 }]), "problem");
 eq("severity 0 leaves a healthy status alone", M.overallState([{ id: "a", status: "ok", severity: 0 }]), "ok");
 eq("issues honours severity", M.issues([{ id: "a", status: "ok", severity: 3 }]).length, 1);
-eq("counts still tracks status, not severity", M.counts([{ id: "a", status: "ok", severity: 3 }]).ok, 1);
+// counts uses the SAME weight rule as overallState/byCategory/the report, so a
+// status/severity contradiction resolves once, in the more serious direction,
+// for every consumer. It used to bucket on status alone and disagree with them.
+eq("counts honours severity like the rest of the rollup",
+  { ok: 0, info: 0, attention: 0, problem: 1, total: 1 },
+  M.counts([{ id: "a", status: "ok", severity: 3 }]));
 
 // A silent redaction rule is worse than no rule. The report must SAY when it
 // could not determine an identifier, instead of claiming redaction while the

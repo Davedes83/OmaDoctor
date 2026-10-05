@@ -66,7 +66,10 @@ svc_state() {
         _sv_load=1 ;;
       active | inactive | failed | activating | deactivating | reloading)
         _sv_active=1 ;;
-      running | dead | exited | listening | failed | start | stop | sigchld)
+      running | dead | exited | listening | failed | start | stop | sigchld | \
+      start-pre | start-post | stop-pre | stop-post | stop-watchdog | \
+      stop-sigterm | stop-sigkill | final-sigterm | final-sigkill | \
+      reload | reload-signal | reload-notify | auto-restart | cleaning | condition)
         _sv_sub=1 ;;
       *)
         return 1 ;;

@@ -424,11 +424,22 @@ function issues(checks) {
 }
 
 // counts(checks) -> { ok, info, attention, problem, total }
+//
+// Buckets by checkWeight, the SAME rule overallState, byCategory and the report
+// header use, so severity wins when a producer contradicts itself. Bucketing on
+// status alone made the summary read "1 check passed" for a scan the report
+// called PROBLEM and the findings list rendered as a failure -- one scan, three
+// verdicts. A recognised severity of 1 or 3 now moves the bucket in the more
+// serious direction, exactly as it already does everywhere else.
 function counts(checks) {
   var c = { ok: 0, info: 0, attention: 0, problem: 0, total: 0 }
   var list = eachReal(checks)
   for (var i = 0; i < list.length; i++) {
-    var s = normStatus(list[i].status)
+    var chk = list[i]
+    var s = normStatus(chk.status)
+    var w = checkWeight(chk)
+    if (w >= 3) s = "problem"
+    else if (w >= 1) s = "attention"
     c[s]++
     c.total++
   }
@@ -643,7 +654,11 @@ function redact(text, opts) {
   s = s.replace(/\/mnt\/[A-Za-z0-9._-]+/g, "/mnt/<volume>");
   s = s.replace(/\/media\/[A-Za-z0-9._-]+/g, "/media/<volume>");
   s = s.replace(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g, "<uuid>");
-  s = s.replace(/\b([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-)\d{4}-/g, "$1<uuid>-");
+  // Truncated or malformed UUIDs: mask the WHOLE token rather than only the
+  // middle all-digit group. The old form left the first two groups (12 hex
+  // chars, the bulk of the fingerprint) in clear, so a shortened id published
+  // publicly was barely redacted at all.
+  s = s.replace(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4,}/g, "<uuid>");
   // 16 hex digits, upper- or lowercase, is the NTFS/volume-serial convention;
   // an explicit "serial" label covers hdparm/lsblk/udev output in any width.
   s = s.replace(/\b([0-9A-Fa-f]{16})\b/g, "<serial>");
@@ -740,7 +755,11 @@ function redact(text, opts) {
   // consumed "wlp0s20" out of "wlp0s20f3" and left a dangling "f3", so the
   // report read "Interfaces: <iface> <iface>f3" -- which redacts nothing useful
   // while looking like it did.
-  s = s.replace(/\b(?:wlp|wlan|wl|enp|eno|ens|enx|eth)\d+[a-z0-9]*/g, "<iface>");
+  // wlx/wwan/wwp are included because they are MAC-derived names: wlx<12hex>
+  // embeds the interface's MAC in its own name, so leaving the token intact
+  // leaked both the interface and the MAC (the bare-12-hex rule cannot see it,
+  // since there is no word boundary inside "wlx001122334455").
+  s = s.replace(/\b(?:wlp|wlan|wlx|wwan|wwp|enp|eno|ens|enx|eth|wl)\d+[a-z0-9]*/g, "<iface>");
 
   // ------------------------------------------------------- hostname / user
   //

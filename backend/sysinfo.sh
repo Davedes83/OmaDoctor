@@ -125,7 +125,7 @@ if have free; then
   stotal=${1:-0}
   sused=${2:-0}
   if [ "$stotal" -gt 0 ]; then
-    spct=$(printf '%s %s' "$sused" "$stotal" | /usr/bin/awk '{printf "%d", ($1>0 ? $2*100/$1 : 0)}')
+    spct=$(printf '%s %s' "$sused" "$stotal" | /usr/bin/awk '{printf "%d", ($2>0 ? $1*100/$2 : 0)}')
     if [ "$sused" -gt 0 ]; then
       emit "system.swap" system attention 1 "Swap" "${spct}% used" \
         "swap in use" \

@@ -94,12 +94,18 @@ wp_default_node() {
 # percentage, so both forms are normalised to a percentage here. Anything that
 # is not a Volume line yields nothing: the usage banner and "Object not found"
 # both carry digits, and parsing those would invent a reading.
+#
+# The "%" is what distinguishes the two forms, NOT the magnitude. A sink can be
+# over-amplified above 1.0 ("Volume: 1.52"), and the old `v <= 1.0` test read
+# that 152% sink as "2%" -- a healthy-looking value on a check whose whole job is
+# to surface oddities. When the line carries no "%" it is the float form and is
+# always scaled; a "%" means it is already a percentage.
 wp_vol_pct() {
   printf '%s\n' "$1" | /usr/bin/awk '
     $0 !~ /[Vv]olume/ { next }
     match($0, /[0-9]+(\.[0-9]+)?/) {
       v = substr($0, RSTART, RLENGTH) + 0
-      if (v <= 1.0) v = v * 100
+      if ($0 !~ /%/) v = v * 100
       printf "%d", (v + 0.5)
     }
   '

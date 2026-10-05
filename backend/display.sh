@@ -157,7 +157,16 @@ _d_checked=0
 # would raise a bogus "unsupported mode" caution with an empty mode -- directly
 # contradicting the display.disabled_outputs finding that says the same
 # unplugged display is harmless.
-for _d_m in $(hypr_active_monitor_names "$_d_monitors"); do
+#
+# The names are newline-separated. Read them line by line from a here-doc rather
+# than `for ... in $(...)`: the here-doc runs in THIS shell, so the counter and
+# mismatch accumulator are not lost to a subshell, and `IFS= read` is scoped to
+# the read builtin -- it never changes the global IFS that hypr_mode_is_supported
+# relies on to word-split availableModes. The explicit `read` also avoids the
+# unquoted-expansion traps: no pathname globbing, and a name containing spaces
+# stays whole.
+while IFS= read -r _d_m; do
+  [ -n "$_d_m" ] || continue
   _d_checked=$((_d_checked + 1))
   if ! hypr_mode_is_supported "$_d_monitors" "$_d_m"; then
     _d_mode=$(hypr_monitor_mode "$_d_monitors" "$_d_m")
@@ -166,7 +175,9 @@ for _d_m in $(hypr_active_monitor_names "$_d_monitors"); do
     fi
     _d_mismatch="${_d_mismatch}$_d_m at $_d_mode"
   fi
-done
+done <<_OD_MONITORS
+$(hypr_active_monitor_names "$_d_monitors")
+_OD_MONITORS
 
 if [ "$_d_checked" -eq 0 ]; then
   emit "display.modes" display info 0 "Modes" "unknown" \
