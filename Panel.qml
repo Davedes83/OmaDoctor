@@ -29,10 +29,9 @@ Panel {
 
   // ------------------------------------------------------------ scan state
   property var scan: null
-  property string lastRawJson: ""
   property bool scanning: false
   property string lastError: ""
-  property string lastMode: "quick"
+  readonly property string lastMode: scan ? scan.mode : "quick"
   property string pluginVersion: "0.5.0"
 
   readonly property var checks: scan && Array.isArray(scan.checks) ? scan.checks : []
@@ -184,12 +183,7 @@ Panel {
     ]
     scanProc.running = true
     scanning = true
-    // lastRawJson is deliberately NOT cleared here: it feeds buildReport while
-    // the rescan runs. The failure path below uses scanProc.finished instead,
-    // which is per-scan -- lastRawJson is stale after any earlier success and
-    // cannot tell "this scan produced nothing" from "a previous one succeeded".
-    //
-    // Everything else IS reset: a Process keeps its collected streams between
+    // Reset the collectors: a Process keeps its collected streams between
     // runs, so without this the next scan's tryFinish() could pass the previous
     // scan's stdout/stderr to onScanFinished before the new collectors fire.
     scanProc.stdoutText = ""
@@ -315,7 +309,6 @@ Panel {
 
   function onScanFinished(raw, exitCode, stderrText) {
     scanning = false
-    lastMode = pendingMode
     var parsed = Model.parseDoctor(root.capText(raw))
 
     // stderr is captured rather than discarded. It used to be dropped at three
@@ -430,14 +423,9 @@ Panel {
 
   // --------------------------------------------------------------- report
   function reportText() {
-    // Gated on `ready`, not on lastRawJson. lastRawJson is assigned by the
-    // stdout collector BEFORE the parse is attempted, so after a parse failure
-    // it still held the unparseable payload, buildReportText returned its
-    // "No scan data available." fallback, and that non-empty string was copied
-    // to the clipboard and announced as "Diagnostic report copied (redacted)"
-    // while the panel showed an error.
+    // Copy the same successful scan the panel still shows after a failed rescan.
     if (!root.ready) return ""
-    return Model.buildReportText(root.lastRawJson, {
+    return Model.buildReport(root.scan, {
       now: root.clockSec,
       redactInfo: root.redactInfo,
       redact: true,
@@ -646,7 +634,6 @@ Panel {
       if (scanProc.finished) return
       if (!scanProc.stdoutDone || !scanProc.stderrDone) return
       scanProc.finished = true
-      root.lastRawJson = scanProc.stdoutText
       root.onScanFinished(scanProc.stdoutText, scanProc.exitCode, scanProc.stderrText)
     }
     stdout: StdioCollector {
