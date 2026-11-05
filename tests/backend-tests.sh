@@ -593,6 +593,30 @@ done
 lat=$(printf '%s' "$FULL" | jq -r '[.checks[]|select(.id=="network.latency")]|length' 2>/dev/null)
 check_eq "the full scan emits network.latency even when ICMP is blocked" "1" "$lat"
 
+# A Wi-Fi address must not satisfy a wired check. Link-local-only and IPv6-only
+# Ethernet have different results, and an unused port is informational.
+WIRED=$(mktemp -d)
+cp "$BACKEND_DIR/bootstrap.sh" "$BACKEND_DIR/common.sh" "$WIRED/"
+sed -e "s|have nmcli|test -x '$WIRED/nmcli'|" -e "s|/usr/bin/nmcli|$WIRED/nmcli|" \
+  "$BACKEND_DIR/network.sh" > "$WIRED/network.sh"
+cat > "$WIRED/nmcli" <<'EOF'
+#!/bin/sh
+printf '%s\n' GENERAL.DEVICE:wlan0 GENERAL.TYPE:wifi GENERAL.NM-MANAGED:yes 'IP4.ADDRESS[1]:192.0.2.2/24'
+for port in 1 2 3; do
+  printf '%s\n' "GENERAL.DEVICE:eth$port" GENERAL.TYPE:ethernet GENERAL.NM-MANAGED:yes
+  case "$port" in
+    1) printf '%s\n' WIRED-PROPERTIES.CARRIER:off ;;
+    2) printf '%s\n' WIRED-PROPERTIES.CARRIER:on 'IP6.ADDRESS[1]:fe80::2/64' ;;
+    3) printf '%s\n' WIRED-PROPERTIES.CARRIER:on 'IP6.ADDRESS[1]:2001:db8::3/64' ;;
+  esac
+done
+EOF
+chmod +x "$WIRED/nmcli"
+wired=$(run "$WIRED/network.sh" | jq -r '[.checks[] | select(.id | startswith("network.ethernet.")) | .status + "/" + .value] | join("; ")')
+check_eq "Ethernet reports each port independently of Wi-Fi" \
+  "info/no cable link; info/link up, no address beyond link-local; ok/link and address present" "$wired"
+rm -r -- "$WIRED"
+
 # audio.devices counted wpctl's SECTION HEADERS as if they were hardware.
 dev_val=$(printf '%s' "$QUICK" | jq -r '.checks[]|select(.id=="audio.devices")|.value' 2>/dev/null)
 dev_hdr=$(wpctl status 2>/dev/null | grep -cE '^[[:space:]]*(Sinks|Sources|Devices):' || printf 0)

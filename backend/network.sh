@@ -75,6 +75,41 @@ else
     "active non-virtual interfaces" ""
 fi
 
+# Check wired adapters separately from the system route, which may be on Wi-Fi.
+if have nmcli && wired=$(/usr/bin/timeout -k 1 3 /usr/bin/nmcli -t -e no -f \
+    GENERAL.DEVICE,GENERAL.TYPE,GENERAL.NM-MANAGED,WIRED-PROPERTIES.CARRIER,IP4.ADDRESS,IP6.ADDRESS \
+    device show 2>/dev/null); then
+  wired=$(printf '%s\n' "$wired" | /usr/bin/awk -F: '
+    function report() {
+      if (kind == "ethernet" && managed == "yes" && (carrier == "on" || carrier == "off"))
+        print device, carrier, (address ? "yes" : "no")
+    }
+    $1 == "GENERAL.DEVICE" { report(); device=$2; kind=managed=carrier=""; address=0 }
+    $1 == "GENERAL.TYPE" { kind=$2 }
+    $1 == "GENERAL.NM-MANAGED" { managed=$2 }
+    $1 == "WIRED-PROPERTIES.CARRIER" { carrier=$2 }
+    /^IP4\.ADDRESS\[[0-9]+\]:[0-9]/ && $2 !~ /^169\.254\./ { address=1 }
+    /^IP6\.ADDRESS\[[0-9]+\]:[0-9a-f:]/ && tolower($2) !~ /^fe[89ab][0-9a-f]$/ { address=1 }
+    END { report() }
+  ')
+  while read -r iface carrier address; do
+    [ -n "$iface" ] || continue
+    if [ "$carrier" = "off" ]; then
+      emit "network.ethernet.$iface" network info 0 "Ethernet" "no cable link" \
+        "No link on interface $iface." "If using this port, check the cable, dock or switch."
+    elif [ "$address" = "no" ]; then
+      emit "network.ethernet.$iface" network info 0 "Ethernet" "link up, no address beyond link-local" \
+        "Interface $iface has a link but lacks an address beyond link-local." \
+        "If this port should have its own address, check its NetworkManager profile and DHCP or static IP settings."
+    else
+      emit "network.ethernet.$iface" network ok 0 "Ethernet" "link and address present" \
+        "Interface $iface has a link and an IPv4 or IPv6 address beyond link-local." ""
+    fi
+  done <<EOF
+$wired
+EOF
+fi
+
 # ----------------------------------------------------------------- default route
 gw=""
 if have ip; then
