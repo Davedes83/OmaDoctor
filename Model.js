@@ -6,6 +6,23 @@
 
 //.pragma library
 
+function resolveAiCommand(override, defaultAgent, candidates, onPath, model) {
+  if (override !== "") return override
+
+  var fallback = ""
+  for (var i = 0; i < candidates.length; i++) {
+    var command = candidates[i]
+    var bin = command.split(" ")[0]
+    if (!onPath[bin]) continue
+    if (bin === defaultAgent) return command
+    if (fallback === "") fallback = command
+  }
+
+  if (fallback !== "") return fallback
+  // Ollama needs a model name before it can be selected.
+  return onPath["ollama"] && model !== "" ? "ollama run " + model : ""
+}
+
 // ------------------------------------------------------------------ parsing
 
 // parseDoctor(text) -> scan object, or null when the payload is unusable.

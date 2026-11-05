@@ -46,7 +46,7 @@
         "type": "string",
         "label": "AI command for 'Ask AI'",
         "defaultValue": "",
-        "description": "Full command line; the report is fed on stdin. Leave empty to auto-detect from your PATH. e.g. 'ollama run llama3.2' or 'aichat'."
+        "description": "CLI command for stdin, e.g. 'ollama run llama3.2'. Use 'chatgpt' to copy the prompt and open the desktop app. Leave empty to prefer Omarchy's default agent."
       },
       {
         "key": "askAiModel",
