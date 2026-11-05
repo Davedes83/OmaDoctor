@@ -182,22 +182,8 @@ Panel {
       "/bin/sh", root.doctorPath,
       requested
     ]
-    scanProc.running = true
     scanning = true
-    // lastRawJson is deliberately NOT cleared here: it feeds buildReport while
-    // the rescan runs. The failure path below uses scanProc.finished instead,
-    // which is per-scan -- lastRawJson is stale after any earlier success and
-    // cannot tell "this scan produced nothing" from "a previous one succeeded".
-    //
-    // Everything else IS reset: a Process keeps its collected streams between
-    // runs, so without this the next scan's tryFinish() could pass the previous
-    // scan's stdout/stderr to onScanFinished before the new collectors fire.
-    scanProc.stdoutText = ""
-    scanProc.stderrText = ""
-    scanProc.stdoutDone = false
-    scanProc.stderrDone = false
-    scanProc.exitCode = 0
-    scanProc.finished = false
+    scanProc.running = true
   }
 
   property string pendingMode: "quick"
@@ -314,6 +300,7 @@ Panel {
   }
 
   function onScanFinished(raw, exitCode, stderrText) {
+    lastRawJson = root.capText(raw)
     scanning = false
     lastMode = pendingMode
     var parsed = Model.parseDoctor(root.capText(raw))
@@ -621,64 +608,23 @@ Panel {
     id: scanProc
     clearEnvironment: true
     environment: root.trustedEnv()
-    // stderr is collected, not discarded. run-capped.sh and doctor.sh both
-    // redirect it to /dev/null internally, so this catches anything a section
-    // writes before those redirections, plus the timeout's own diagnostics --
-    // which is the difference between "could not read scan output" and a message
-    // a user can act on.
-    property string stdoutText: ""
-    property string stderrText: ""
-    // Per-scan "onScanFinished already ran" latch. stdout's collector, stderr's
-    // collector and onExited all race to finish the scan; whichever gets there
-    // with BOTH streams still wins, the others stand down -- otherwise an
-    // empty-output failure ran onScanFinished twice and the second call
-    // clobbered the useful message.
-    property bool finished: false
-    property bool stdoutDone: false
-    property bool stderrDone: false
-    property int exitCode: 0
-    // Finish only once BOTH collectors have delivered EOF. Finishing on stdout
-    // alone handed onScanFinished whatever stderr happened to hold at that
-    // instant -- often the PREVIOUS scan's text, since a Process's collected
-    // stream is not cleared between runs. That turned a transient failure into
-    // a message naming the wrong cause.
-    function tryFinish() {
-      if (scanProc.finished) return
-      if (!scanProc.stdoutDone || !scanProc.stderrDone) return
-      scanProc.finished = true
-      root.lastRawJson = scanProc.stdoutText
-      root.onScanFinished(scanProc.stdoutText, scanProc.exitCode, scanProc.stderrText)
-    }
     stdout: StdioCollector {
+      id: scanStdout
       waitForEnd: true
-      onStreamFinished: {
-        scanProc.stdoutText = root.capText(text)
-        scanProc.stdoutDone = true
-        scanProc.tryFinish()
-      }
     }
     stderr: StdioCollector {
+      id: scanStderr
       waitForEnd: true
-      onStreamFinished: {
-        scanProc.stderrText = root.capText(text)
-        scanProc.stderrDone = true
-        scanProc.tryFinish()
-      }
     }
-    // scanning was cleared ONLY from onStreamFinished. If the collector never
-    // fires -- the Process cannot spawn at all, the command array is malformed,
-    // the timeout binary is missing -- nothing ever cleared the flag and the
-    // panel sat on "scanning..." indefinitely. The asymmetry was visible in the
-    // file: copyProc had an onExited and scanProc did not.
+    // Quickshell drains both streams before emitting exited. Finishing from
+    // a collector can start the queued scan before the old exit handler runs.
     onExited: function(exitCode) {
-      root.scanning = false
-      scanProc.exitCode = exitCode
-      // A collector that never fires must not strand the scan on "scanning...".
-      // onExited normally arrives after both streams have drained; forcing the
-      // flags here only matters when one of them produced no EOF at all.
-      scanProc.stdoutDone = true
-      scanProc.stderrDone = true
-      scanProc.tryFinish()
+      root.onScanFinished(scanStdout.text, exitCode, scanStderr.text)
+    }
+    // A spawn failure changes running without emitting exited.
+    onRunningChanged: {
+      if (!scanProc.running && root.scanning)
+        root.onScanFinished("", 0, "could not start scan process")
     }
   }
 
