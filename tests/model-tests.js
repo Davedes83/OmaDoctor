@@ -76,8 +76,8 @@ function eqThrows(name, fn) {
 
 const aiCandidates = ["opencode", "gemini", "claude -p", "codex exec"];
 const installedAi = { opencode: true, gemini: true, claude: true, codex: true };
-eq("explicit ChatGPT choice wins over the Omarchy default", "chatgpt",
-  M.resolveAiCommand("chatgpt", "claude", aiCandidates, installedAi, ""));
+eq("explicit widget command wins over the Omarchy default", "aichat",
+  M.resolveAiCommand("aichat", "claude", aiCandidates, installedAi, ""));
 eq("installed Claude default wins over OpenCode", "claude -p",
   M.resolveAiCommand("", "claude", aiCandidates, installedAi, ""));
 eq("Codex default resolves to its stdin command", "codex exec",

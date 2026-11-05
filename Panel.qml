@@ -691,7 +691,6 @@ Panel {
     stdinEnabled: true
     command: ["/usr/bin/wl-copy"]
     property string pending: ""
-    property bool openChatGpt: false
     property bool succeeded: false
     onStarted: {
       if (copyProc.pending !== "") {
@@ -706,15 +705,6 @@ Panel {
       copyProc.succeeded = (exitCode === 0)
       var ok = copyProc.succeeded
       copyProc.pending = ""
-      if (copyProc.openChatGpt) {
-        copyProc.openChatGpt = false
-        if (ok) {
-          Quickshell.execDetached(["/usr/bin/gtk-launch", "chatgpt"])
-          root.notify("OmaDoctor", "Prompt copied. Paste it into ChatGPT.",
-            Model.glyph("ok"), "normal")
-          return
-        }
-      }
       // Confirm AFTER the exit status, not before. The old code announced
       // success at the moment it queued the copy, so it claimed success even
       // when a second click silently dropped the payload (setting running=true
@@ -862,7 +852,6 @@ Panel {
 
   readonly property string resolvedAiCommand: Model.resolveAiCommand(
     root.aiOverride, root.omarchyDefaultAgent, root.aiCandidates, root.aiOnPath, root.aiModel)
-  readonly property bool aiPendingDesktop: root.aiPendingCommand === "chatgpt"
 
   function probeAi() {
     var found = {}
@@ -1021,22 +1010,15 @@ Panel {
   }
 
   // copyText(text) -> the clipboard, via one guarded stdin writer.
-  function copyText(text, openChatGpt) {
+  function copyText(text) {
     if (copyProc.running) return false
     copyProc.pending = String(text || "")
-    copyProc.openChatGpt = openChatGpt === true
     copyProc.running = true
     return true
   }
 
   function runAi() {
     if (!root.aiConfirmOpened || root.aiRunning) return
-    if (root.aiPendingDesktop) {
-      if (root.copyText(root.aiPreview, true)) root.aiConfirmOpened = false
-      else root.notify("OmaDoctor", "Clipboard is busy. Try again in a moment.",
-        Model.glyph("attention"), "normal")
-      return
-    }
     if (root.splitCommand(root.aiPendingCommand).length === 0) return
     root.aiConfirmOpened = false
     root.aiRunning = true
@@ -1371,9 +1353,7 @@ Panel {
               width: implicitWidth + actionRow.share(implicitWidth)
               iconText: "󰚩"
               text: "Ask AI"
-              tooltipText: root.resolvedAiCommand === "chatgpt"
-                ? "Copy the redacted prompt and open ChatGPT"
-                : root.resolvedAiCommand !== ""
+              tooltipText: root.resolvedAiCommand !== ""
                 ? "Send the redacted report to " + root.resolvedAiCommand
                 : "Copy a ready-to-paste prompt (no AI CLI found)"
               foreground: root.foreground
@@ -1573,8 +1553,7 @@ Panel {
 
               Text {
                 width: parent.width
-                text: root.aiPendingDesktop ? "Open ChatGPT with this prompt copied?"
-                  : "Send this report to your AI?"
+                text: "Send this report to your AI?"
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.title
@@ -1583,8 +1562,7 @@ Panel {
 
               Text {
                 width: parent.width
-                text: "Command:  " + (root.aiPendingDesktop
-                  ? "gtk-launch chatgpt" : root.aiPendingCommand)
+                text: "Command:  " + root.aiPendingCommand
                 color: root.accent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -1595,12 +1573,10 @@ Panel {
 
               Text {
                 width: parent.width
-                text: root.aiPendingDesktop
-                  ? "Paste the redacted prompt into ChatGPT when you're ready."
-                  : root.aiPendingCommand.indexOf("ollama ") === 0
+                text: root.aiPendingCommand.indexOf("ollama ") === 0
                   ? "A LOCAL model runs this. Nothing leaves your machine."
                   : "This sends the redacted report to a remote provider. Read it before you continue."
-                color: root.aiPendingDesktop || root.aiPendingCommand.indexOf("ollama ") === 0
+                color: root.aiPendingCommand.indexOf("ollama ") === 0
                   ? root.foreground : root.urgent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -1661,9 +1637,7 @@ Panel {
               anchors.right: parent.right
               anchors.bottom: aiActions.top
               anchors.bottomMargin: Style.spacing.sm
-              text: root.aiPendingDesktop
-                ? "Enter copies and opens ChatGPT   ·   c copies only   ·   Esc cancels"
-                : "Enter sends   ·   c copies the prompt instead   ·   Esc cancels"
+              text: "Enter sends   ·   c copies the prompt instead   ·   Esc cancels"
               color: Qt.darker(root.foreground, 1.4)
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -1679,7 +1653,7 @@ Panel {
 
               Button {
                 width: Math.max(1, (parent.width - Style.spacing.sm * 2) / 3)
-                text: root.aiPendingDesktop ? "Copy & Open" : "Send"
+                text: "Send"
                 bordered: true
                 foreground: root.foreground
                 accent: root.accent

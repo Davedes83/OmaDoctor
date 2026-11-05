@@ -46,7 +46,7 @@
         "type": "string",
         "label": "AI command for 'Ask AI'",
         "defaultValue": "",
-        "description": "CLI command for stdin, e.g. 'ollama run llama3.2'. Use 'chatgpt' to copy the prompt and open the desktop app. Leave empty to prefer Omarchy's default agent."
+        "description": "CLI command for stdin, e.g. 'ollama run llama3.2'. Leave empty to prefer Omarchy's default agent."
       },
       {
         "key": "askAiModel",

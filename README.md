@@ -175,11 +175,6 @@ Then **Send**, **Copy** (puts the prompt on the clipboard instead, for pasting
 into anything), or **Esc**. If no supported CLI is found it says so and copies
 the prompt rather than doing nothing.
 
-If you use the ChatGPT desktop app, set `askAiCommand` to `chatgpt` in the
-widget settings. The confirmation sheet offers **Copy & Open**, which copies
-the redacted prompt and launches the app. Paste and send the prompt in ChatGPT
-when you're ready.
-
 For CLI assistants, **Send** stages the redacted prompt under
 `~/.local/state/omadoctor/` and opens the assistant in your terminal. Most
 commands read the prompt from stdin. OpenCode receives a reference to the
@@ -189,7 +184,7 @@ staged file through `--prompt`.
 
 | key | default | meaning |
 |---|---|---|
-| `askAiCommand` | `""` | CLI command, e.g. `ollama run llama3.2`, or `chatgpt` for the desktop app. Empty means prefer Omarchy's default agent. |
+| `askAiCommand` | `""` | CLI command, e.g. `ollama run llama3.2`. The prompt is fed on stdin. Empty means prefer Omarchy's default agent. |
 | `askAiModel` | `""` | model name, for assistants that require one. `ollama run` has no default-model mode. |
 
 Anything not in the built-in list works through `askAiCommand`. The command line
