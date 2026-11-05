@@ -29,11 +29,11 @@
 # directory names under $HOME (storage.big_dirs) and verbatim hyprctl
 # configerrors text (hyprland.config_errors), so this is not theoretical.
 #
-# Order matters: backslash and double quote first, then the control characters,
-# then newline flattening.
+# Escape existing backslashes before adding JSON escapes. Use NUL-delimited
+# input so sed sees embedded newlines as data inside one record.
 jstr() {
   _s=$1
-  _s=$(printf '%s' "$_s" | /usr/bin/sed \
+  _s=$(printf '%s' "$_s" | /usr/bin/sed -z \
         -e 's/\\/\\\\/g' \
         -e 's/"/\\"/g' \
         -e 's/\x01/\\u0001/g' -e 's/\x02/\\u0002/g' \

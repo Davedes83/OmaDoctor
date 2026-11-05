@@ -393,8 +393,9 @@ check_eq "a missing repair label yields a null repair" "null" \
 
 # Values inside the optional fields go through jstr like everything else, so a
 # quote, a backslash or a newline cannot corrupt the document.
-check_eq "evidence is escaped like any other value" '["a \"q\" & \\ b"]' \
-  "$(emit_one 'emitd i c attention 1 T V D S "a \"q\" & \\ b"' | jq -c '.[0].details')"
+check_eq "evidence is escaped like any other value" '["a \"q\" & \\ b\nc"]' \
+  "$(emit_one 'emitd i c attention 1 T V D S "a \"q\" & \\ b
+c"' | jq -c '.[0].details')"
 
 # ------------------------------------------------------------- scan history
 #
