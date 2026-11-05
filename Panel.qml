@@ -518,6 +518,7 @@ Panel {
     function runFullScan(): void { root.refresh("full", true) }
 
     function copyReport(): void { root.copyReport() }
+    function openNetworkTroubleshooter(): void { root.openNetworkTroubleshooter() }
 
     // Ask AI is scriptable too, but it still goes through the confirmation
     // sheet -- an IPC caller cannot bypass consent.
@@ -770,14 +771,10 @@ Panel {
   }
 
   // ---------------------------------------------------------- keyboard nav
-  // One cursor, shared by keyboard and mouse, so the highlight is never
-  // ambiguous. The rows are the two actions; findings are listed, not walked.
-  // The actions come first because they are what a user opens the panel to do.
+  // One cursor for the action buttons. Findings are read without a cursor.
   property bool cursorActive: false
   property int selectedIndex: -1
-  // Three actions: full diagnosis, copy report, ask AI. Ask AI is last because
-  // it is the only one that can leave the machine.
-  readonly property int rowCount: 3
+  readonly property int rowCount: root.showNetworkTroubleshooter ? 4 : 3
 
   function moveCursor(dy) {
     var n = root.rowCount
@@ -797,7 +794,41 @@ Panel {
     if (!root.cursorActive) return
     if (root.selectedIndex === 0) root.refresh("full", true)
     else if (root.selectedIndex === 1) root.copyReport()
-    else root.askAi()
+    else if (root.selectedIndex === 2) root.askAi()
+    else if (root.selectedIndex === 3) root.openNetworkTroubleshooter()
+  }
+
+  readonly property string networkAppSetting: String(root.setting("networkTroubleshooterDesktopId", "auto") || "").trim()
+  readonly property string networkDesktopId: root.networkAppSetting === "auto"
+    ? "io.github.muness.NetworkTroubleshooter"
+    : root.networkAppSetting.replace(/\.desktop$/, "")
+  readonly property bool networkAppInstalled: {
+    const entries = DesktopEntries.applications.values
+    for (let i = 0; i < entries.length; i++)
+      if (entries[i].id === root.networkDesktopId) return true
+    return false
+  }
+  readonly property bool showNetworkTroubleshooter: root.networkDesktopId !== ""
+    && (root.networkAppSetting !== "auto" || root.networkAppInstalled)
+
+  function openNetworkTroubleshooter() {
+    if (!root.showNetworkTroubleshooter || networkLaunch.running) return
+    if (!root.networkAppInstalled) {
+      root.notify("OmaDoctor", "Network troubleshooter app not found. Check its desktop app ID in the widget settings.",
+                  Model.glyph("info"), "normal")
+      return
+    }
+    networkLaunch.command = ["/usr/bin/gtk-launch", "--", root.networkDesktopId + ".desktop"]
+    networkLaunch.running = true
+  }
+
+  Process {
+    id: networkLaunch
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.close()
+      else root.notify("OmaDoctor", "Could not open the network troubleshooter.",
+                       Model.glyph("info"), "normal")
+    }
   }
 
   // ================================================================= Ask AI
@@ -1369,6 +1400,18 @@ Panel {
               verticalPadding: Style.spacing.controlPaddingY - Style.space(1)
               onClicked: root.askAi()
             }
+          }
+
+          Button {
+            visible: root.showNetworkTroubleshooter
+            text: "Open Network Troubleshooter"
+            foreground: root.foreground
+            accent: root.accent
+            bordered: true
+            enabled: !networkLaunch.running
+            hasCursor: root.cursorActive && root.selectedIndex === 3
+            fontSize: Style.font.bodySmall
+            onClicked: root.openNetworkTroubleshooter()
           }
 
           PanelSeparator { width: parent.width; foreground: root.foreground }

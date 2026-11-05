@@ -325,6 +325,12 @@ degrades a single check to `unknown` rather than breaking the scan.
 
 ## Installing
 
+### Open a local network troubleshooter
+
+OmaDoctor shows **Open Network Troubleshooter** when [Network Troubleshooter](https://github.com/muness/network-troubleshooter) is installed. The button works before a scan and opens the app locally. To use a different app, set **Network troubleshooter app** in the widget settings to its desktop app ID, with or without `.desktop`. Clear the setting to hide the button, or enter `auto` to restore detection.
+
+### Install the widget
+
 ```sh
 omarchy plugin add https://github.com/Davedes83/OmaDoctor.git --enable
 ```
