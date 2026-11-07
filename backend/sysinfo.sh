@@ -217,27 +217,6 @@ else
     "systemctl unavailable" ""
 fi
 
-# ----------------------------------------------------------- recent kernel logs
-if have journalctl; then
-  # journalctl -p 3 -b lists boot-time messages at err level or worse. A machine
-  # can be "up" while its logs scream about hardware, drivers or filesystem
-  # errors -- the "it works but logs are screaming" class this check surfaces.
-  # It is informational: a flood of errors is worth reviewing, not an outage.
-  _jl=$(/usr/bin/timeout -k 2 10 journalctl -p 3 -b --no-pager 2>/dev/null | /usr/bin/grep -c . || true)
-  case "$_jl" in '' | *[!0-9]*) _jl=0 ;; esac
-  if [ "$_jl" -gt 10 ]; then
-    emit "system.boot_errors" system attention 1 "Boot-time errors" "$_jl since boot" \
-      "journalctl -p 3 -b reports error-level messages from this boot" \
-      "Review with: journalctl -p 3 -b"
-  else
-    emit "system.boot_errors" system info 0 "Boot-time errors" "$_jl since boot" \
-      "no significant boot-time errors in the journal" ""
-  fi
-else
-  emit "system.boot_errors" system info 0 "Boot-time errors" "unknown" \
-    "journalctl unavailable" ""
-fi
-
 # ---------------------------------------------- pending package updates (read-only)
 #
 # checkupdates SYNCS THE PACMAN DATABASE over the network before comparing, so
