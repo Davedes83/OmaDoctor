@@ -269,6 +269,30 @@ bad_svc=$(printf '%s' "$SERVICES" | jq -r '[.checks[]
   ] | length')
 check_eq "every service value is a known state or explicit unknown" "0" "$bad_svc"
 
+# svc_state checked all three systemctl words against ONE shared vocabulary.
+# "loaded failed failed" -- a genuinely failed unit -- matched "loaded" as
+# LoadState and BOTH "failed" words as ActiveState, leaving SubState unclaimed,
+# so the tuple was rejected and a failed daemon was reported as "unknown".
+# Drive the real script against a stub systemctl so it is the positional parser
+# under test, not a copy of it.
+SVC_TMP=$(mktemp -d)
+cp "$BACKEND_DIR/bootstrap.sh" "$BACKEND_DIR/common.sh" "$BACKEND_DIR/services.sh" "$SVC_TMP/" 2>/dev/null
+cat > "$SVC_TMP/systemctl" <<'STUB'
+#!/bin/sh
+case "$*" in
+  *pipewire.service*) printf 'loaded\nactive\nrunning\n' ;;
+  *)                  printf 'loaded\nfailed\nfailed\n' ;;
+esac
+STUB
+chmod +x "$SVC_TMP/systemctl"
+sed "s#/usr/bin/systemctl#$SVC_TMP/systemctl#g" "$SVC_TMP/services.sh" > "$SVC_TMP/services.test.sh"
+svc_test=$(/usr/bin/timeout -k 2 20 /bin/sh "$SVC_TMP/services.test.sh" 2>/dev/null </dev/null)
+rm -rf "$SVC_TMP"
+check_eq "a failed unit's three words are accepted positionally" "failed" \
+  "$(printf '%s' "$svc_test" | jq -r '.checks[]|select(.id=="services.wireplumber")|.value' 2>/dev/null)"
+check_eq "an active unit is still read as running" "running" \
+  "$(printf '%s' "$svc_test" | jq -r '.checks[]|select(.id=="services.pipewire")|.value' 2>/dev/null)"
+
 # ------------------------------------------------------- display vocabulary
 #
 # The Display Doctor's whole value depends on NOT inventing a display problem.
@@ -542,9 +566,33 @@ check_eq "jnum rejects a bare minus" "null" "$(jnum_of "-")"
 check_eq "jnum rejects a leading plus" "null" "$(jnum_of "+5")"
 check_eq "jnum rejects leading zeros" "null" "$(jnum_of "007")"
 check_eq "jnum rejects a trailing dot" "null" "$(jnum_of "5.")"
-check_eq "jnum accepts a negative float" "-2.5" "$(jnum_of "-2.5")"
-check_eq "jnum accepts an exponent" "1e5" "$(jnum_of "1e5")"
+check_eq "jnum rejects a negative float" "null" "$(jnum_of "-2.5")"
+check_eq "jnum rejects an exponent" "null" "$(jnum_of "1e5")"
 check_eq "jnum accepts zero" "0" "$(jnum_of "0")"
+check_eq "jnum accepts small integer" "3" "$(jnum_of "3")"
+
+# A newline inside a value used to survive jstr verbatim: sed is line-oriented,
+# so its `s/\x0a/\\n/` rule could never match and the document was invalid JSON
+# -- which the panel reports as "no scan" and throws every finding away.
+jstr_of() { /bin/sh -c '. "$1"; jstr "$2"' _ "$BACKEND_DIR/common.sh" "$1"; }
+nl_json=$(jstr_of "$(printf 'a\nb')")
+check_eq "jstr flattens a newline instead of emitting it raw" '"a b"' "$nl_json"
+if printf '%s' "$nl_json" | jq -e . >/dev/null 2>&1; then
+  ok "a value containing a newline still yields valid JSON"
+else
+  fail "a value containing a newline still yields valid JSON" "$nl_json"
+fi
+
+# severity_for_pct must never hand back "unknown": Model.normStatus fails
+# CLOSED, turning an unknown status into a severity-3 problem, so an unreadable
+# df once reported every filesystem as critically full.
+sev_of() {
+  /bin/sh -c '. "$1"; severity_for_pct "$2"; printf "%s|%s" "$STATUS" "$SEVERITY"' \
+    _ "$BACKEND_DIR/common.sh" "$1"
+}
+check_eq "an unreadable percentage is info, not unknown" "info|0" "$(sev_of '')"
+check_eq "a numeric percentage is still classified" "ok|0" "$(sev_of 50)"
+check_eq "a critically full filesystem is still a problem" "problem|3" "$(sev_of 99)"
 
 # json_fragment_ok is what stops one bad section from taking the whole scan
 # down. Each of these shapes was reachable and each broke the merge.
@@ -559,6 +607,8 @@ check_eq "json_fragment_ok accepts a nested object field" "OK" "$(frag '{"id":"a
 check_eq "json_fragment_ok rejects truncation" "BAD" "$(frag '{"id":"a"},{"id":"b","cat')"
 check_eq "json_fragment_ok rejects a nested array element" "BAD" "$(frag '[]')"
 check_eq "json_fragment_ok rejects a spliced document" "BAD" "$(frag '{"section":"x","checks":[]}')"
+check_eq "json_fragment_ok rejects a wrapped section that contains checks" "BAD" \
+  "$(frag '{"section":"x","checks":[{"id":"a","status":"ok"}]}')"
 check_eq "json_fragment_ok rejects a trailing comma" "BAD" "$(frag '{"id":"a"},')"
 check_eq "json_fragment_ok rejects an unclosed string" "BAD" "$(frag '{"id":"a')"
 check_eq "json_fragment_ok rejects an element with no id" "BAD" "$(frag '{"title":"a"}')"
@@ -659,13 +709,14 @@ fi
 # A writable root is the normal state of a desktop, so it once sat in the
 # default arm of the case as attention 1. Every healthy machine therefore
 # finished on ATTENTION with nothing actionable in it, and a scan that always
-# says ATTENTION is a scan whose ATTENTION gets ignored. Neither rw nor ro may
-# exceed severity 0; only an unreadable mount option may.
+# says ATTENTION is a scan whose ATTENTION gets ignored. rw stays severity 0;
+# only a READ-ONLY root is escalated (attention), because writes and updates
+# genuinely fail against it.
 root_sev=$(printf '%s' "$QUICK" | jq -r '.checks[]|select(.id=="storage.root_writable")|.severity' 2>/dev/null)
 if [ -n "$root_sev" ] && [ "$root_sev" -le 0 ] 2>/dev/null; then
-  ok "the root filesystem check never raises a severity"
+  ok "a writable root filesystem never raises a severity"
 else
-  fail "the root filesystem check never raises a severity" "severity=$root_sev"
+  fail "a writable root filesystem never raises a severity" "severity=$root_sev"
 fi
 
 # The ro/rw flag is the first field, and it has to be matched as a whole field.
@@ -696,5 +747,12 @@ done
 # The new workspace check, which uses the parser that already existed unused.
 ws=$(printf '%s' "$QUICK" | jq -r '[.checks[]|select(.id=="hyprland.workspaces")]|length' 2>/dev/null)
 check_eq "the scan emits a workspaces check" "1" "$ws"
+
+# The disabled-output count used wc -l on input that might not end with a
+# newline, which is off by one. grep -c . counts actual lines.
+check_eq "line counting is newline-safe" "2" \
+  "$(printf '%s\n' "DP-1" "DP-2" | /usr/bin/grep -c . | /usr/bin/tr -d ' ')"
+check_eq "line counting handles a single line" "1" \
+  "$(printf '%s\n' "DP-1" | /usr/bin/grep -c . | /usr/bin/tr -d ' ')"
 
 finish

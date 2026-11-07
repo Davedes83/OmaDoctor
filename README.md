@@ -213,6 +213,43 @@ purely to keep a bar glyph fresh, is the plugin's largest steady-state cost.
 Opening the panel still runs a full scan, so the only thing lost is background
 freshness.
 
+### Settings in the panel
+
+The panel has a **Settings** section with three toggles:
+
+| toggle | meaning |
+|---|---|
+| Background polling | turns the `pollSeconds` background scan on/off |
+| Notify on problems | turns the `notifyOnProblem` worsening notification on/off |
+| Show all checks | lists every check, including passing ones, instead of only findings |
+
+They mirror `shell.json`'s `pollSeconds` and `notifyOnProblem` settings and are
+also discoverable there.
+
+### Scan on wake / unlock
+
+OmaDoctor does not poll by default, so a machine that has been asleep can have a
+stale glyph when you open it. A wake hook is provided at
+`hooks/wake-scan.sh`:
+
+```sh
+# Install as an Omarchy wake hook
+omarchy hook install wake ~/.config/omarchy/plugins/davedes.omadoctor/hooks/wake-scan.sh
+
+# Wire to system resume
+# /usr/lib/systemd/system-sleep/omadoctor-wake:
+#   #!/bin/sh
+#   [ "$1" = "post" ] || exit 0
+#   su -s /bin/sh davedes -c 'omarchy hook wake'
+
+# Wire to session unlock (Hyprland)
+#   bind = $mainMod, M, exec, omarchy hook wake
+```
+
+The hook calls `runFullScan` through the plugin's IPC handler, so it runs a
+full (network-inclusive) diagnosis. Notifications still respect `shouldNotify` —
+a scan triggered by wake does not spam you if nothing changed.
+
 ### Notifications
 
 OmaDoctor notifies only when the machine gets **worse**, never when it gets

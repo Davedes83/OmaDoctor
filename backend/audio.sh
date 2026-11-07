@@ -22,7 +22,7 @@ CHECKS=""
 user_service_state() {
   _st=$(/usr/bin/systemctl --user is-active "$1" 2>/dev/null | /usr/bin/head -n 1)
   case "$_st" in
-    active | inactive | failed | activating | deactivating | "") printf '%s' "${_st:-unknown}" ;;
+    active | inactive | failed | activating | deactivating | reloading | "") printf '%s' "${_st:-unknown}" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -39,6 +39,16 @@ if [ "$pipewire" = "failed" ] || [ "$wplumber" = "failed" ]; then
     "Inspect with: systemctl --user --failed"
 elif [ "$pipewire" = "active" ] && [ "$wplumber" = "active" ]; then
   emit "audio.server" audio ok 0 "Audio server" "running" "$server_detail" ""
+elif [ "$pipewire" = "activating" ] || [ "$pipewire" = "deactivating" ] || \
+     [ "$pipewire" = "reloading" ] || \
+     [ "$wplumber" = "activating" ] || [ "$wplumber" = "deactivating" ] || \
+     [ "$wplumber" = "reloading" ]; then
+  # A service caught mid-transition is not broken. The old final else sent
+  # EVERY unhandled state to "not running"/problem, so a scan landing during a
+  # restart announced "audio will not work at all" about a stack that was
+  # coming up normally.
+  emit "audio.server" audio info 0 "Audio server" "changing state" "$server_detail" \
+    "The audio service is starting or stopping; rescan in a moment"
 elif [ "$pipewire" = "active" ]; then
   emit "audio.server" audio attention 1 "Audio server" "degraded" "$server_detail" \
     "WirePlumber is not running; device routing and volume control will misbehave."

@@ -29,7 +29,6 @@ Panel {
 
   // ------------------------------------------------------------ scan state
   property var scan: null
-  property string lastRawJson: ""
   property bool scanning: false
   property string lastError: ""
   property string lastMode: "quick"
@@ -41,10 +40,16 @@ Panel {
   readonly property bool ready: scan !== null
   readonly property int issueCount: Model.issues(checks).length
 
-  // Flat, UI-ready list of section headers and finding rows. Built in Model.js
+  // Flat, UI-ready list of section headers and check rows. Built in Model.js
   // so it is unit-testable and so the panel needs only a single Repeater -- see
   // the note on the findings Repeater below.
-  readonly property var rows: Model.findingRows(checks)
+  //
+  // showAllChecks toggles between "only findings that need attention" and
+  // "every check, including passing ones" so the healthy case is verifiable.
+  property bool showAllChecks: false
+  property var rows: root.showAllChecks
+    ? Model.allFindingRows(checks)
+    : Model.findingRows(checks)
   readonly property int alertCategories: {
     var n = 0
     for (var i = 0; i < root.rows.length; i++) {
@@ -184,14 +189,14 @@ Panel {
     ]
     scanProc.running = true
     scanning = true
-    // lastRawJson is deliberately NOT cleared here: it feeds buildReport while
-    // the rescan runs. The failure path below uses scanProc.finished instead,
-    // which is per-scan -- lastRawJson is stale after any earlier success and
-    // cannot tell "this scan produced nothing" from "a previous one succeeded".
-    //
-    // Everything else IS reset: a Process keeps its collected streams between
-    // runs, so without this the next scan's tryFinish() could pass the previous
+    // The collected streams are reset below. A Process keeps them between runs,
+    // so without this the next scan's tryFinish() could pass the previous
     // scan's stdout/stderr to onScanFinished before the new collectors fire.
+    //
+    // The last completed `scan` is deliberately NOT cleared while the rescan
+    // runs: it is what the panel shows and what the report is built from, so a
+    // failed rescan leaves the last known good document intact instead of
+    // blanking the UI.
     scanProc.stdoutText = ""
     scanProc.stderrText = ""
     scanProc.stdoutDone = false
@@ -430,14 +435,16 @@ Panel {
 
   // --------------------------------------------------------------- report
   function reportText() {
-    // Gated on `ready`, not on lastRawJson. lastRawJson is assigned by the
-    // stdout collector BEFORE the parse is attempted, so after a parse failure
-    // it still held the unparseable payload, buildReportText returned its
-    // "No scan data available." fallback, and that non-empty string was copied
-    // to the clipboard and announced as "Diagnostic report copied (redacted)"
-    // while the panel showed an error.
+    // Built from the PARSED scan, never from lastRawJson. lastRawJson is
+    // assigned by the stdout collector BEFORE the parse is attempted, so after
+    // a bad scan it still held the unparseable payload; when an earlier scan
+    // had succeeded, `ready` was true and buildReportText returned its
+    // "No scan data available." fallback -- which was then copied to the
+    // clipboard and announced as "Diagnostic report copied (redacted)" while
+    // the panel showed a fresh error. Rendering the very scan on screen also
+    // guarantees the report and the UI can never disagree.
     if (!root.ready) return ""
-    return Model.buildReportText(root.lastRawJson, {
+    return Model.buildReport(root.scan, {
       now: root.clockSec,
       redactInfo: root.redactInfo,
       redact: true,
@@ -646,7 +653,6 @@ Panel {
       if (scanProc.finished) return
       if (!scanProc.stdoutDone || !scanProc.stderrDone) return
       scanProc.finished = true
-      root.lastRawJson = scanProc.stdoutText
       root.onScanFinished(scanProc.stdoutText, scanProc.exitCode, scanProc.stderrText)
     }
     stdout: StdioCollector {
@@ -1368,6 +1374,79 @@ Panel {
               horizontalPadding: Style.spacing.controlPaddingX - Style.space(2)
               verticalPadding: Style.spacing.controlPaddingY - Style.space(1)
               onClicked: root.askAi()
+            }
+          }
+
+          PanelSeparator { width: parent.width; foreground: root.foreground }
+
+          // ------------------------------------------------- settings
+          // Polling and notification toggles live in the shell schema
+          // (bar.layout.<section>.pollSeconds / notifyOnProblem) but had no UI
+          // -- togglePolling()/toggleNotifications() were defined and never
+          // called. A settings row makes them discoverable.
+          Column {
+            width: parent.width
+            spacing: Style.spacing.xs
+            topPadding: Style.spacing.sm
+            bottomPadding: Style.spacing.sm
+
+            // background polling toggle
+            Row {
+              width: parent.width
+              spacing: Style.spacing.sm
+              Button {
+                width: implicitWidth
+                iconText: root.pollMs > 0 ? "󰓏" : "󰑓"
+                text: root.pollMs > 0
+                  ? "Polling every " + Math.round(root.pollMs / 1000) + "s"
+                  : "Background polling"
+                tooltipText: root.pollMs > 0
+                  ? "A quick scan runs every " + Math.round(root.pollMs / 1000) + " seconds.\nTurn off to scan only when you open the panel."
+                  : "Turn on periodic quick scans so the bar glyph stays fresh."
+                foreground: root.foreground
+                accent: root.accent
+                bordered: true
+                fontSize: Style.font.bodySmall
+                onClicked: root.togglePolling()
+              }
+            }
+
+            // notifications toggle
+            Row {
+              width: parent.width
+              spacing: Style.spacing.sm
+              Button {
+                width: implicitWidth
+                iconText: root.notifyEnabled ? "󰂚" : "󰂛"
+                text: root.notifyEnabled ? "Notify on problems" : "Notifications off"
+                tooltipText: root.notifyEnabled
+                  ? "A worsening scan posts a notification once.\nTurn off to silence them."
+                  : "Turn on to be notified when a scan finds a new problem."
+                foreground: root.foreground
+                accent: root.accent
+                bordered: true
+                fontSize: Style.font.bodySmall
+                onClicked: root.toggleNotifications()
+              }
+            }
+
+            // show-all-checks toggle
+            Row {
+              width: parent.width
+              spacing: Style.spacing.sm
+              Button {
+                width: implicitWidth
+                iconText: root.showAllChecks ? "󰍨" : "󰋖"
+                text: root.showAllChecks ? "Show findings only" : "Show all checks"
+                tooltipText: root.showAllChecks
+                  ? "Only checks that need attention are listed.\nTurn off to see every check the scan ran."
+                  : "Every check is listed, including passing ones.\nTurn on to hide the noise and show only findings."
+                foreground: root.foreground
+                accent: root.accent
+                bordered: true
+                fontSize: Style.font.bodySmall
+                onClicked: root.showAllChecks = !root.showAllChecks
+              }
             }
           }
 

@@ -19,7 +19,7 @@ const src = fs.readFileSync(modelPath, "utf8");
 const EXPORTS = [
   "parseDoctor", "overallState", "issues", "counts", "byCategory",
   "findCheck", "weight", "normStatus", "fmtAge", "glyph", "stateLabel", "redact", "buildReport",
-  "buildReportText", "findingRows", "strArray", "normRepair",
+  "buildReportText", "findingRows", "allFindingRows", "strArray", "normRepair",
   "shouldNotify", "notificationText", "diffScans", "changeSummary", "redactGaps",
   "summaryLine", "breakdownLine"
 ];
@@ -513,6 +513,24 @@ eq("findingRows returns nothing for an all-clear scan",
 eq("findingRows tolerates empty input", 0, M.findingRows([]).length);
 eq("findingRows tolerates null input", 0, M.findingRows(null).length);
 eq("findingRows tolerates non-array input", 0, M.findingRows("nope").length);
+
+// allFindingRows includes every check, not just the ones needing attention.
+// The same rowScan has 5 checks but findingRows only returns 2 (the problem
+// and attention ones); allFindingRows returns all 5.
+const allRows = M.allFindingRows(rowScan.checks);
+eq("allFindingRows emits every check", 5, allRows.filter(r => r.kind === "check").length);
+eq("allFindingRows includes ok checks", "Root",
+  (allRows.filter(r => r.kind === "check"
+    && r.check.id === "t.ok")[0] || { check: {} }).check.title);
+eq("allFindingRows includes info checks", "Devices",
+  (allRows.filter(r => r.kind === "check"
+    && r.check.id === "a.ok")[0] || { check: {} }).check.title);
+eq("allFindingRows includes headers for every category",
+  "SYSTEM,AUDIO,STORAGE",
+  allRows.filter(r => r.kind === "header").map(r => r.category).join(","));
+
+eq("allFindingRows tolerates empty input", 0, M.allFindingRows([]).length);
+eq("allFindingRows tolerates null input", 0, M.allFindingRows(null).length);
 
 // Category order is the machine's shape, not alphabetical: what you are, then
 // what it depends on, then what makes noise. It also has to be STABLE, or the

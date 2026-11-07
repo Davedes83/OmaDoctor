@@ -48,9 +48,20 @@ fi
 # ---------------------------------------------------------------- arch / kernel
 arch=$(uname -m 2>/dev/null)
 kernel=$(uname -r 2>/dev/null)
-emit "system.arch" system ok 0 "Architecture" "${arch:-unknown}" "" ""
-emit "system.kernel" system ok 0 "Kernel" "${kernel:-unknown}" \
-  "release $(uname -r 2>/dev/null | /usr/bin/cut -d- -f1)" ""
+if [ -n "$arch" ]; then
+  emit "system.arch" system ok 0 "Architecture" "$arch" "" ""
+else
+  # A failed uname is an unread fact, not a healthy one.
+  emit "system.arch" system info 0 "Architecture" "unknown" \
+    "uname -m did not report an architecture" ""
+fi
+if [ -n "$kernel" ]; then
+  emit "system.kernel" system ok 0 "Kernel" "$kernel" \
+    "release $(printf '%s' "$kernel" | /usr/bin/cut -d- -f1)" ""
+else
+  emit "system.kernel" system info 0 "Kernel" "unknown" \
+    "uname -r did not report a kernel release" ""
+fi
 
 # ---------------------------------------------------------------------- uptime
 up=$(read_file /proc/uptime | /usr/bin/cut -d' ' -f1)
@@ -148,21 +159,83 @@ fi
 
 # ------------------------------------------------------- failed systemd units
 if have systemctl; then
-  failed=$(/usr/bin/systemctl list-units --state=failed --no-legend --plain --no-pager 2>/dev/null | /usr/bin/grep -c . || true)
-  case "$failed" in '' | *[!0-9]*) failed=0 ;; esac
-  if [ "$failed" -gt 0 ]; then
-    names=$(/usr/bin/systemctl list-units --state=failed --no-legend --plain --no-pager 2>/dev/null \
-            | /usr/bin/awk '{print $1}' | /usr/bin/head -n 4 | /usr/bin/tr '\n' ' ')
-    emit "system.failed_units" system problem 3 "Failed services" "$failed failed" \
-      "$names" \
-      "Inspect with: systemctl --failed --no-pager"
+  # Capture the output AND the exit status separately. The old pipeline made
+  # the shell see `grep -c`'s status, so a systemctl that failed to run (no
+  # system bus, a wedged manager) yielded an empty list that grep counted as 0
+  # -- and the section reported "no failed units", a clean bill of health from
+  # a probe that never answered.
+  _units=$(/usr/bin/systemctl list-units --state=failed --no-legend --plain --no-pager 2>/dev/null)
+  _units_rc=$?
+  if [ "$_units_rc" -ne 0 ]; then
+    emit "system.failed_units" system info 0 "Failed services" "unknown" \
+      "systemctl list-units failed (exit $_units_rc)" ""
   else
-    emit "system.failed_units" system ok 0 "Failed services" "none" \
-      "no failed systemd units" ""
+    failed=$(printf '%s\n' "$_units" | /usr/bin/grep -c . || true)
+    case "$failed" in '' | *[!0-9]*) failed=0 ;; esac
+    if [ "$failed" -gt 0 ]; then
+      names=$(printf '%s\n' "$_units" \
+              | /usr/bin/awk '{print $1}' | /usr/bin/head -n 4 | /usr/bin/tr '\n' ' ')
+      emit "system.failed_units" system problem 3 "Failed services" "$failed failed" \
+        "$names" \
+        "Inspect with: systemctl --failed --no-pager"
+    else
+      emit "system.failed_units" system ok 0 "Failed services" "none" \
+        "no failed systemd units" ""
+    fi
   fi
 else
   emit "system.failed_units" system info 0 "Failed services" "unknown" \
     "systemctl unavailable" ""
+fi
+
+# ----------------------------------------------------- user-scope failed units
+if have systemctl; then
+  # The system manager is only half the picture. A failed user service
+  # (wireplumber, portal, pipewire) breaks the session just as surely, and
+  # systemctl --user is a separate manager with its own failure list.
+  _user_units=$(/usr/bin/systemctl --user list-units --state=failed --no-legend --plain --no-pager 2>/dev/null)
+  _user_rc=$?
+  if [ "$_user_rc" -ne 0 ]; then
+    emit "system.user_failed_units" system info 0 "User services" "unknown" \
+      "systemctl --user list-units failed (exit $_user_rc)" ""
+  else
+    user_failed=$(printf '%s\n' "$_user_units" | /usr/bin/grep -c . || true)
+    case "$user_failed" in '' | *[!0-9]*) user_failed=0 ;; esac
+    if [ "$user_failed" -gt 0 ]; then
+      user_names=$(printf '%s\n' "$_user_units" \
+              | /usr/bin/awk '{print $1}' | /usr/bin/head -n 4 | /usr/bin/tr '\n' ' ')
+      emit "system.user_failed_units" system attention 1 "User services" "$user_failed failed" \
+        "$user_names" \
+        "A user service has failed. Inspect with: systemctl --user --failed"
+    else
+      emit "system.user_failed_units" system ok 0 "User services" "none" \
+        "no failed user systemd units" ""
+    fi
+  fi
+else
+  emit "system.user_failed_units" system info 0 "User services" "unknown" \
+    "systemctl unavailable" ""
+fi
+
+# ----------------------------------------------------------- recent kernel logs
+if have journalctl; then
+  # journalctl -p 3 -b lists boot-time messages at err level or worse. A machine
+  # can be "up" while its logs scream about hardware, drivers or filesystem
+  # errors -- the "it works but logs are screaming" class this check surfaces.
+  # It is informational: a flood of errors is worth reviewing, not an outage.
+  _jl=$(/usr/bin/timeout -k 2 10 journalctl -p 3 -b --no-pager 2>/dev/null | /usr/bin/grep -c . || true)
+  case "$_jl" in '' | *[!0-9]*) _jl=0 ;; esac
+  if [ "$_jl" -gt 10 ]; then
+    emit "system.boot_errors" system attention 1 "Boot-time errors" "$_jl since boot" \
+      "journalctl -p 3 -b reports error-level messages from this boot" \
+      "Review with: journalctl -p 3 -b"
+  else
+    emit "system.boot_errors" system info 0 "Boot-time errors" "$_jl since boot" \
+      "no significant boot-time errors in the journal" ""
+  fi
+else
+  emit "system.boot_errors" system info 0 "Boot-time errors" "unknown" \
+    "journalctl unavailable" ""
 fi
 
 # ---------------------------------------------- pending package updates (read-only)
@@ -176,15 +249,40 @@ fi
 # reports "not checked" rather than inventing a number.
 if [ "${OMADOCTOR_MODE:-quick}" = "full" ]; then
   if have checkupdates; then
-    cu=$(/usr/bin/timeout -k 2 10 checkupdates 2>/dev/null | /usr/bin/grep -c . || true)
-    case "$cu" in '' | *[!0-9]*) cu=0 ;; esac
-    if [ "$cu" -gt 0 ]; then
-      emit "system.updates" system info 0 "Pending updates" "$cu packages" \
-        "checkupdates reports $cu available" \
-        "Review with: omarchy update"
-    else
-      emit "system.updates" system ok 0 "Pending updates" "none" "system is up to date" ""
-    fi
+    # checkupdates encodes its answer in the EXIT STATUS: 0 = updates present,
+    # 2 = up to date, anything else (typically 1) = it failed. The old pipeline
+    # read `grep -c`'s status instead, so a failed sync was counted as "0 lines"
+    # and reported as "none -- system is up to date": a false clean bill of
+    # health from a network probe that never completed.
+    cu_out=$(/usr/bin/timeout -k 2 10 checkupdates 2>/dev/null)
+    cu_rc=$?
+    case "$cu_rc" in
+      0)
+        cu=$(printf '%s\n' "$cu_out" | /usr/bin/grep -c . || true)
+        case "$cu" in '' | *[!0-9]*) cu=0 ;; esac
+        if [ "$cu" -gt 0 ]; then
+          emit "system.updates" system info 0 "Pending updates" "$cu packages" \
+            "checkupdates reports $cu available" \
+            "Review with: omarchy update"
+        else
+          emit "system.updates" system info 0 "Pending updates" "unknown" \
+            "checkupdates exited 0 but listed no packages" ""
+        fi
+        ;;
+      2)
+        emit "system.updates" system ok 0 "Pending updates" "none" \
+          "system is up to date" ""
+        ;;
+      124 | 137)
+        emit "system.updates" system info 0 "Pending updates" "unknown" \
+          "checkupdates timed out while syncing the package database" ""
+        ;;
+      *)
+        emit "system.updates" system info 0 "Pending updates" "unknown" \
+          "checkupdates failed (exit $cu_rc)" \
+          "Run 'checkupdates' directly to see the error"
+        ;;
+    esac
   else
     emit "system.updates" system info 0 "Pending updates" "unknown" \
       "checkupdates not installed" ""

@@ -135,7 +135,7 @@ if [ -n "$_d_disabled" ]; then
   _d_dlist=$(printf '%s' "$_d_disabled" | /usr/bin/tr '\n' ' ')
   _d_dlist=$(printf '%s' "$_d_dlist" | /usr/bin/sed 's/[[:space:]]*$//')
   emitd "display.disabled_outputs" display attention 1 "Inactive outputs" \
-    "$(printf '%s' "$_d_disabled" | /usr/bin/wc -l | /usr/bin/tr -d ' ')" \
+    "$(printf '%s\n' "$_d_disabled" | /usr/bin/grep -c .)" \
     "a monitor rule exists for output(s) that are not currently active" \
     "Harmless while unplugged; if a display stops coming back after replugging, this is why" \
     "disabled: $_d_dlist"
@@ -151,6 +151,7 @@ fi
 # failure: Hyprland can still apply one, it just may not survive a reconnect.
 
 _d_mismatch=""
+_d_unknown=""
 _d_checked=0
 # Iterate the ENABLED outputs only. A disabled output has no mode line at all,
 # so hypr_mode_is_supported returns false for it and every unplugged display
@@ -168,7 +169,18 @@ _d_checked=0
 while IFS= read -r _d_m; do
   [ -n "$_d_m" ] || continue
   _d_checked=$((_d_checked + 1))
-  if ! hypr_mode_is_supported "$_d_monitors" "$_d_m"; then
+  # Three outcomes, not two. hyprctl can omit availableModes entirely (an
+  # output that has not finished probing, or a changed format); treating that
+  # as "unsupported" invented a fault, and treating it as "supported" claimed a
+  # pass it never measured. 2 is "no verdict", which becomes info below.
+  hypr_mode_is_supported "$_d_monitors" "$_d_m"
+  _d_rc=$?
+  if [ "$_d_rc" -eq 2 ]; then
+    if [ -n "$_d_unknown" ]; then
+      _d_unknown="$_d_unknown, "
+    fi
+    _d_unknown="${_d_unknown}$_d_m"
+  elif [ "$_d_rc" -ne 0 ]; then
     _d_mode=$(hypr_monitor_mode "$_d_monitors" "$_d_m")
     if [ -n "$_d_mismatch" ]; then
       _d_mismatch="$_d_mismatch; "
@@ -182,18 +194,23 @@ _OD_MONITORS
 if [ "$_d_checked" -eq 0 ]; then
   emit "display.modes" display info 0 "Modes" "unknown" \
     "no monitor could be read" ""
-elif [ -z "$_d_mismatch" ]; then
-  emitd "display.modes" display ok 0 "Modes" "supported" \
-    "every active output runs a mode that output reports as available" \
-    "" \
-    "outputs checked: $_d_checked"
-else
+elif [ -n "$_d_mismatch" ]; then
   emitr "display.modes" display attention 1 "Modes" "unsupported mode set" \
     "an output is running a mode it does not list as available" \
     "This is why a display can revert to another resolution after a reconnect or resume" \
     caution "Adjust the monitor rule's mode" \
     "OmaDoctor never edits your monitor configuration" \
     "affected: $_d_mismatch"
+elif [ -n "$_d_unknown" ]; then
+  emitd "display.modes" display info 0 "Modes" "unknown" \
+    "Hyprland did not report an available-mode list for every active output" \
+    "Not a fault; the mode could not be compared on this scan" \
+    "no availableModes: $_d_unknown"
+else
+  emitd "display.modes" display ok 0 "Modes" "supported" \
+    "every active output runs a mode that output reports as available" \
+    "" \
+    "outputs checked: $_d_checked"
 fi
 
 # ------------------------------------------------------------------- mirroring

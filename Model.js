@@ -588,6 +588,25 @@ function findingRows(checks) {
   return rows
 }
 
+// allFindingRows(checks) -> every check, not just the ones needing attention.
+//
+// Same flat shape as findingRows(), but includes passing checks too so the
+// healthy case is verifiable rather than just "34 checks fine". Categories
+// with no checks at all are still omitted.
+function allFindingRows(checks) {
+  var rows = []
+  var buckets = byCategory(checks)
+  for (var i = 0; i < buckets.length; i++) {
+    var all = buckets[i].checks
+    if (all.length === 0) continue
+    rows.push({ kind: "header", category: str(buckets[i].category).toUpperCase() })
+    for (var j = 0; j < all.length; j++) {
+      rows.push({ kind: "check", check: all[j] })
+    }
+  }
+  return rows
+}
+
 // ------------------------------------------------------------------ formatting
 
 // fmtAge(tsSeconds, nowSeconds) -> human relative age, e.g. "3m ago".

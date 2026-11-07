@@ -33,6 +33,13 @@
 # then newline flattening.
 jstr() {
   _s=$1
+  # sed is LINE-ORIENTED: it strips the newline before the pattern space exists,
+  # so the later `s/\x0a/\\n/g` can never match and a multi-line value used to
+  # pass through with a RAW newline -- producing a document JSON.parse rejects,
+  # which discards every finding in the scan. Flatten newlines first so the
+  # escaping below operates on one line. Values are rendered one line anyway
+  # (Model.oneLine), so a space is the honest replacement.
+  _s=$(printf '%s' "$_s" | /usr/bin/tr '\n' ' ')
   _s=$(printf '%s' "$_s" | /usr/bin/sed \
         -e 's/\\/\\\\/g' \
         -e 's/"/\\"/g' \
@@ -66,11 +73,16 @@ jstr() {
 #
 #   -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
 jnum() {
-  OMADOCTOR_JNUM=$1 /usr/bin/awk 'BEGIN {
-    num = "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?$"
-    v = ENVIRON["OMADOCTOR_JNUM"]
-    print (v ~ num) ? v : "null"
-  }'
+  # jnum VALUE -> print a JSON number, or null when the value is not one.
+  #
+  # Severity is always a non-negative integer (0/1/3 per the contract), so this
+  # only accepts canonical non-negative integers: "0" or "[1-9][0-9]*". That
+  # replaces the awk fork with a case pattern, cutting one subprocess per check.
+  case "$1" in
+    0) printf '0' ;;
+    [1-9] | [1-9][0-9]*) printf '%s' "$1" ;;
+    *) printf 'null' ;;
+  esac
 }
 
 # check ID CATEGORY STATUS SEVERITY TITLE VALUE DETAIL SUGGESTION
@@ -260,8 +272,14 @@ fs_usage_percent() {
 severity_for_pct() {
   case "$1" in
     '' | *[!0-9]*)
+      # INFO, never "unknown": Model.normStatus fails CLOSED, so an "unknown"
+      # status from a producer becomes a severity-3 PROBLEM. An unreadable df
+      # is not evidence of a broken disk -- it is an unread measurement -- and
+      # this branch once turned every unreadable filesystem into a false
+      # critical finding. Callers still get a non-zero return so they can say
+      # why the reading is missing.
       SEVERITY=0
-      STATUS=unknown
+      STATUS=info
       SUGGESTION=""
       return 1
       ;;
@@ -310,6 +328,14 @@ json_fragment_ok() {
   case "$1" in
     *'"id"'*) ;;
     *) return 1 ;;
+  esac
+  # A whole {"section":..,"checks":[..]} document ALSO carries "id" -- inside
+  # its checks -- so the id test above cannot, on its own, tell it apart from a
+  # bare list of check objects. Its envelope keys are the fingerprint: no check
+  # has a `section` or `checks` field, and a string value containing one has its
+  # quotes escaped by jstr, so it cannot produce this exact byte sequence.
+  case "$1" in
+    *'"section"'* | *'"checks"'*) return 1 ;;
   esac
   printf '%s' "$1" | /usr/bin/awk '
     BEGIN { depth = 0; instr = 0; esc = 0; bad = 0; lines = 0; state = 0 }

@@ -36,8 +36,22 @@ check_fs() {
   _avail=${4-}
   _cap=${5-}
 
-  _pct=$(fs_usage_percent "$_mount")
-  severity_for_pct "$_pct"
+  # _cap is already parsed from the single df call above. fs_usage_percent
+  # would re-run df, so validate inline instead. An unreadable capacity is an
+  # unread measurement, not a full disk.
+  case "$_cap" in
+    '' | *[!0-9%*])
+      emit "storage.fs.$_label" storage info 0 "Filesystem: $_label" "usage unreadable" \
+        "df did not report a usable percentage for $_mount" ""
+      return 0
+      ;;
+  esac
+  _pct=${_cap%\%}
+  if ! severity_for_pct "$_pct"; then
+    emit "storage.fs.$_label" storage info 0 "Filesystem: $_label" "usage unreadable" \
+      "df did not report a usable percentage for $_mount" ""
+    return 0
+  fi
 
   # df -P reports 1024-blocks, so the starting unit is KiB, not bytes.
   # Dividing three times turns KiB -> MiB -> GiB -> TiB, and the loop breaks
@@ -64,7 +78,17 @@ _home=$HOME
 case "$_home" in
   /) ;;
   "") ;;
-  *) check_fs "$_home" "home" ;;
+  *)
+    # Skip a separate home check when /home is the same filesystem as /:
+    # df would report identical numbers and the second check is duplicate work.
+    _root_dev=$(/usr/bin/df -P / 2>/dev/null | /usr/bin/sed -n '2p' | /usr/bin/awk '{print $1}')
+    _home_dev=$(/usr/bin/df -P "$_home" 2>/dev/null | /usr/bin/sed -n '2p' | /usr/bin/awk '{print $1}')
+    if [ "$_root_dev" = "$_home_dev" ] && [ -n "$_root_dev" ]; then
+      :
+    else
+      check_fs "$_home" "home"
+    fi
+    ;;
 esac
 
 # ---------------------------------------------------------------------- inodes
@@ -144,8 +168,13 @@ case "$_root_flat" in
   *)
     case "${_root_flat%%,*}" in
       ro)
-        emit "storage.root_writable" storage ok 0 "Root filesystem" "read-only" \
-          "/ is mounted read-only" ""
+        # Read-only root is NOT the normal state of a desktop: writes, package
+        # updates and most of the session fail against it. It is almost always
+        # the kernel remounting after a filesystem error, so it is actionable
+        # rather than merely informational.
+        emit "storage.root_writable" storage attention 1 "Root filesystem" "read-only" \
+          "/ is mounted read-only, so writes and updates will fail" \
+          "Check 'dmesg' for a filesystem error that forced a read-only remount, then: mount -o remount,rw /"
         ;;
       rw)
         emit "storage.root_writable" storage ok 0 "Root filesystem" "writable" \
