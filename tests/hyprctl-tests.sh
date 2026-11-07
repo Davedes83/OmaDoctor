@@ -267,10 +267,22 @@ check_eq "a mode the output does not list IS a mismatch" "no" \
   "$(hypr_mode_is_supported "$MONITORS_BADMODE_FIXTURE" DP-1 && echo yes || echo no)"
 check_eq "an unavailable monitor reports no verdict either way" "no" \
   "$(hypr_mode_is_supported "$MONITORS_BADMODE_FIXTURE" NO-SUCH-MONITOR && echo yes || echo no)"
-check_eq "a monitor with no availableModes list reports no verdict" "no" \
-  "$(hypr_mode_is_supported 'Monitor DP-1 (ID 0):
+# The verdict is TRI-STATE: 0 supported, 1 unsupported (the list was readable
+# and did not offer this mode), 2 no verdict (nothing to compare). Collapsing 2
+# into 1 raised a fabricated "unsupported mode" caution on an output hyprctl
+# simply had not described; collapsing it into 0 claimed a pass that was never
+# measured.
+mode_verdict() { hypr_mode_is_supported "$1" "$2"; printf '%s' "$?"; }
+check_eq "a supported mode is a verdict of supported" "0" \
+  "$(mode_verdict "$MONITORS_CLEAN_TWO_FIXTURE" eDP-1)"
+check_eq "a mode the output does not list is a verdict of unsupported" "1" \
+  "$(mode_verdict "$MONITORS_BADMODE_FIXTURE" DP-1)"
+check_eq "a monitor with no availableModes list is a verdict of unknown, not unsupported" "2" \
+  "$(mode_verdict 'Monitor DP-1 (ID 0):
         1920x1080@60.00 at 0x0
-        scale: 1' DP-1 && echo yes || echo no)"
+        scale: 1' DP-1)"
+check_eq "an unavailable monitor is a verdict of unknown" "2" \
+  "$(mode_verdict "$MONITORS_BADMODE_FIXTURE" NO-SUCH-MONITOR)"
 
 # A fractional scale must never be mistaken for an unsupported mode: 1.50 is
 # common and legitimate.

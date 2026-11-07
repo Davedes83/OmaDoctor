@@ -59,23 +59,29 @@ svc_state() {
     | /usr/bin/tr '\n' ' ')
   _sv_n=$(printf '%s' "$_sv_out" | /usr/bin/wc -w | /usr/bin/tr -d ' ')
   [ "$_sv_n" = "3" ] || return 1
-  _sv_load=0; _sv_active=0; _sv_sub=0
-  for _sv_w in $_sv_out; do
-    case "$_sv_w" in
-      loaded | not-found | masked | error | bad-setting | merged | stub)
-        _sv_load=1 ;;
-      active | inactive | failed | activating | deactivating | reloading)
-        _sv_active=1 ;;
-      running | dead | exited | listening | failed | start | stop | sigchld | \
-      start-pre | start-post | stop-pre | stop-post | stop-watchdog | \
-      stop-sigterm | stop-sigkill | final-sigterm | final-sigkill | \
-      reload | reload-signal | reload-notify | auto-restart | cleaning | condition)
-        _sv_sub=1 ;;
-      *)
-        return 1 ;;
-    esac
-  done
-  [ "$_sv_load" = "1" ] && [ "$_sv_active" = "1" ] && [ "$_sv_sub" = "1" ] || return 1
+  # Validate BY POSITION. The shared-vocabulary loop this replaces accepted a
+  # word in ANY slot, so the three real values of a failed unit --
+  # "loaded failed failed" -- matched "loaded" as LoadState and both "failed"
+  # words as ActiveState, leaving SubState unclaimed; the whole tuple was then
+  # rejected and a genuinely failed service was reported as "unknown".
+  _sv_load=$(printf '%s' "$_sv_out" | /usr/bin/cut -d' ' -f1)
+  _sv_active=$(printf '%s' "$_sv_out" | /usr/bin/cut -d' ' -f2)
+  _sv_sub=$(printf '%s' "$_sv_out" | /usr/bin/cut -d' ' -f3)
+  case "$_sv_load" in
+    loaded | not-found | masked | error | bad-setting | merged | stub) ;;
+    *) return 1 ;;
+  esac
+  case "$_sv_active" in
+    active | inactive | failed | activating | deactivating | reloading) ;;
+    *) return 1 ;;
+  esac
+  case "$_sv_sub" in
+    running | dead | exited | listening | failed | start | stop | sigchld | \
+    start-pre | start-post | stop-pre | stop-post | stop-watchdog | \
+    stop-sigterm | stop-sigkill | final-sigterm | final-sigkill | \
+    reload | reload-signal | reload-notify | auto-restart | cleaning | condition) ;;
+    *) return 1 ;;
+  esac
   # Collapse to single spaces so the caller can cut on a space deterministically.
   printf '%s' "$_sv_out" | /usr/bin/tr -s ' '
 }

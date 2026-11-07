@@ -321,8 +321,15 @@ hypr_active_monitor_count() {
   printf '%s' "$_n"
 }
 
-# hypr_mode_is_supported MONITORS_TEXT MONITOR -> true when the monitor's
-# CURRENT mode appears in its own availableModes list.
+# hypr_mode_is_supported MONITORS_TEXT MONITOR -> 0 supported | 1 unsupported
+# | 2 no verdict.
+#
+# The third outcome matters. Returning 1 for a monitor whose availableModes
+# list is missing, empty or unparseable is indistinguishable from a genuine
+# mismatch, so display.sh raised an "unsupported mode" caution on an output the
+# compositor simply had not described -- a fabricated fault. Returning 0 instead
+# would claim a comparison that never happened. 2 means "could not judge", and
+# the caller reports it as info.
 #
 # This is the mode/mode mismatch the design brief called out: Hyprland applying
 # a mode the output says it does not support is what causes a display to revert
@@ -341,7 +348,9 @@ hypr_active_monitor_count() {
 # between, say, 60Hz and 120Hz.
 hypr_mode_is_supported() {
   _hm_current=$(hypr_monitor_mode "$1" "$2")
-  [ -n "$_hm_current" ] || return 1
+  # No current mode: the monitor does not exist, is disabled, or its positional
+  # mode line changed shape. Nothing to compare -> no verdict.
+  [ -n "$_hm_current" ] || return 2
   _hm_avail=$(printf '%s\n' "$1" | /usr/bin/awk -v want="$2" '
     /^Monitor [^ ]+ \(ID [0-9]+\):$/ {
       name = $0
@@ -357,13 +366,17 @@ hypr_mode_is_supported() {
       exit
     }
   ')
-  [ -n "$_hm_avail" ] || return 1
+  [ -n "$_hm_avail" ] || return 2
 
   # Reduce the current mode to resolution + numeric refresh.
   _hm_cres=$(printf '%s' "$_hm_current" | /usr/bin/sed -n 's/^\([0-9]*x[0-9]*\)@.*/\1/p')
   _hm_cref=$(printf '%s' "$_hm_current" | /usr/bin/sed -n 's/^.*@//p')
-  [ -n "$_hm_cres" ] && [ -n "$_hm_cref" ] || return 1
+  [ -n "$_hm_cres" ] && [ -n "$_hm_cref" ] || return 2
 
+  # _hm_any records that the list contained at least one entry we could parse.
+  # Without it, a reformatted list would fall through to "unsupported" -- the
+  # same fabricated fault, just from a different shape.
+  _hm_any=0
   for _hm_m in $_hm_avail; do
     case "$_hm_m" in
       *Hz) ;;
@@ -371,15 +384,20 @@ hypr_mode_is_supported() {
     esac
     _hm_ares=$(printf '%s' "$_hm_m" | /usr/bin/sed -n 's/^\([0-9]*x[0-9]*\)@.*/\1/p')
     _hm_aref=$(printf '%s' "$_hm_m" | /usr/bin/sed -n 's/^.*@\([0-9.]*\)Hz.*/\1/p')
-    [ "$_hm_ares" = "$_hm_cres" ] || continue
+    [ -n "$_hm_ares" ] || continue
     [ -n "$_hm_aref" ] || continue
+    _hm_any=1
+    [ "$_hm_ares" = "$_hm_cres" ] || continue
     # awk for the comparison: shell arithmetic cannot do floating point.
     if printf '%s %s %s\n' "$_hm_cref" "$_hm_aref" | \
        /usr/bin/awk '{ d = $1 - $2; if (d < 0) d = -d; exit !(d <= 1.0) }'; then
       return 0
     fi
   done
-  return 1
+  # The list was readable but did not offer this mode: a genuine mismatch. If
+  # nothing in it was parseable at all, the verdict is unknown instead.
+  [ "$_hm_any" = "1" ] && return 1
+  return 2
 }
 
 # hypr_mirrored_monitor MONITORS_TEXT -> the name of a monitor that mirrors

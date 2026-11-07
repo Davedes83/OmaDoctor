@@ -23,6 +23,14 @@
 MODE=${1:-}
 CHECKS=""
 
+# nm_connectivity -> NetworkManager's connectivity state, or nothing when NM
+# is absent. Used to gate "the network is broken" verdicts: an intentionally
+# offline laptop is not a faulty one.
+nm_connectivity() {
+  have nmcli || return 0
+  /usr/bin/timeout -k 1 3 nmcli -t -f connectivity networking connectivity 2>/dev/null
+}
+
 # ping_probe HOST LABEL -> sets PING_OK, PING_LOSS, PING_AVG, PING_RAW
 ping_probe() {
   _host=$1
@@ -33,9 +41,10 @@ ping_probe() {
 
   have ping || { PING_RAW="ping not installed"; return 0; }
 
-  # 3 packets, 0.3s interval (above the unprivileged 0.2s floor), 2s per-packet
-  # timeout: ~2s worst case. LC_ALL=C guarantees English statistics output.
-  out=$(/usr/bin/timeout -k 1 6 ping -n -q -c 3 -i 0.3 -W 2 "$_host" 2>/dev/null)
+  # 3 packets, 0.3s interval. ping's own -w 5 deadline bounds the whole probe
+  # so a blackholed network cannot hang past it; the outer timeout is only the
+  # backstop. LC_ALL=C guarantees English statistics output.
+  out=$(/usr/bin/timeout -k 2 8 ping -n -q -c 3 -i 0.3 -w 5 "$_host" 2>/dev/null)
   [ -n "$out" ] || { PING_RAW="no reply"; return 0; }
 
   loss=$(printf '%s\n' "$out" | /usr/bin/sed -n 's/.*[, ]\([0-9]\{1,3\}\)% packet loss.*/\1/p' | /usr/bin/head -n 1)
@@ -81,9 +90,22 @@ if have ip; then
   gw=$(/usr/bin/ip -4 route show default 2>/dev/null | /usr/bin/awk '/default/ {print $3; exit}')
 fi
 if [ -z "$gw" ]; then
-  emit "network.route" network problem 3 "Default route" "missing" \
-    "no IPv4 default route" \
-    "The machine has no path off-subnet. Check the connection or NetworkManager."
+  nmc=$(nm_connectivity)
+  case "$nmc" in
+    full | limited)
+      # NM says we're connected but there's no route: a real fault.
+      emit "network.route" network problem 3 "Default route" "missing" \
+        "no IPv4 default route" \
+        "NetworkManager reports a connection but there is no gateway. Check routing."
+      ;;
+    *)
+      # Disconnected / portal / unknown / NM absent: a missing route is
+      # expected on an intentionally offline machine, not a fault.
+      emit "network.route" network attention 1 "Default route" "missing" \
+        "no IPv4 default route (connection: ${nmc:-unknown})" \
+        "The machine is not currently connected. Reconnect the network."
+      ;;
+  esac
 else
   emit "network.route" network ok 0 "Default route" "$gw" \
     "IPv4 gateway" ""
@@ -142,9 +164,19 @@ if have getent; then
   dns_probe=$(/usr/bin/timeout -k 1 5 getent hosts omarchy.org 2>/dev/null | /usr/bin/head -n 1)
   case "$dns_probe" in
     '')
-      emit "network.dns" network problem 3 "DNS resolution" "failed" \
-        "could not resolve omarchy.org" \
-        "Names do not resolve even though servers are configured. Try: resolvectl query omarchy.org"
+      nmc=$(nm_connectivity)
+      case "$nmc" in
+        full | limited)
+          emit "network.dns" network problem 3 "DNS resolution" "failed" \
+            "could not resolve omarchy.org" \
+            "Names do not resolve even though servers are configured. Try: resolvectl query omarchy.org"
+          ;;
+        *)
+          emit "network.dns" network attention 1 "DNS resolution" "failed" \
+            "could not resolve omarchy.org (connection: ${nmc:-unknown})" \
+            "Not currently connected; name resolution is expected to fail."
+          ;;
+      esac
       ;;
     *)
       emit "network.dns" network ok 0 "DNS resolution" "working" \
@@ -189,9 +221,19 @@ elif [ -z "$PING_LOSS" ]; then
   emit "network.internet" network info 0 "Internet" "unknown (ICMP blocked)" \
     "$PING_RAW" ""
 else
-  emit "network.internet" network problem 3 "Internet" "unreachable" \
-    "$PING_RAW" \
-    "Gateway is fine but the internet is not. DNS worked, so check routing/firewall."
+  nmc=$(nm_connectivity)
+  case "$nmc" in
+    full | limited)
+      emit "network.internet" network problem 3 "Internet" "unreachable" \
+        "$PING_RAW" \
+        "Gateway is fine but the internet is not. DNS worked, so check routing/firewall."
+      ;;
+    *)
+      emit "network.internet" network attention 1 "Internet" "unreachable (connection: ${nmc:-unknown})" \
+        "$PING_RAW" \
+        "Not currently connected; the internet is expected to be unreachable."
+      ;;
+  esac
 fi
 
 # ------------------------------------------------------------------- latency
