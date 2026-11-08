@@ -6,6 +6,8 @@ Tracked improvements for the OmaDoctor Omarchy plugin.
 
 - [x] Show all checks (collapsed/expandable section) - Panel.qml + Model.js
   - allFindingRows() added to Model.js; showAllChecks toggle in Panel.qml settings; tests added.
+  - SECURITY FIX: all FindingRow Text elements now use Text.PlainText so attacker-controlled
+    device names (from wpctl/audio parsing) cannot be interpreted as AutoText image tags.
 
 - [x] Scan on resume/unlock via Omarchy hook - hooks + Panel.qml
   - hooks/wake-scan.sh created; README documents how to install as a wake hook and wire to systemd-sleep / Hyprland unlock.
@@ -24,3 +26,6 @@ Tracked improvements for the OmaDoctor Omarchy plugin.
 
 - [x] Settings discoverability UI (poll/notify toggles) - Panel.qml
   - Added settings section with polling, notifications, and show-all-checks toggles; togglePolling/toggleNotifications now wired to UI.
+
+- [ ] Marketplace verification - omacom/omarchy-plugin-marketplace#14273
+  - Validation passed; security baseline returned review-required with Conditional Medium finding on AutoText in FindingRow. Fix the AutoText issue, push new commit, create new verification issue.

@@ -1837,6 +1837,7 @@ Panel {
           font.pixelSize: Style.font.body
           font.bold: findingRow.isCheck && findingRow.check.status === "problem"
           elide: Text.ElideRight
+          textFormat: Text.PlainText
         }
 
         Text {
@@ -1847,6 +1848,7 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
           elide: Text.ElideRight
+          textFormat: Text.PlainText
         }
 
         // Evidence and the suggested fix are the reason the panel exists, so
@@ -1859,6 +1861,7 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
+          textFormat: Text.PlainText
         }
 
         Text {
@@ -1869,6 +1872,7 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
+          textFormat: Text.PlainText
         }
       }
     }
