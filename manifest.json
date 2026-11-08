@@ -20,6 +20,7 @@
     "defaults": {
       "pollSeconds": 0,
       "notifyOnProblem": true,
+      "networkTroubleshooterDesktopId": "auto",
       "askAiCommand": "",
       "askAiModel": ""
     },
@@ -40,6 +41,13 @@
         "label": "Notify when a check gets worse",
         "defaultValue": true,
         "description": "Fires at most once per worsening transition, never on the first scan, and never after a scan you ran yourself."
+      },
+      {
+        "key": "networkTroubleshooterDesktopId",
+        "type": "string",
+        "label": "Network troubleshooter app",
+        "defaultValue": "auto",
+        "description": "Auto shows Network Troubleshooter if installed. Enter another desktop app ID, or leave blank to hide the action."
       },
       {
         "key": "askAiCommand",

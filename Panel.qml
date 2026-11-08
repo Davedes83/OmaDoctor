@@ -525,6 +525,7 @@ Panel {
     function runFullScan(): void { root.refresh("full", true) }
 
     function copyReport(): void { root.copyReport() }
+    function openNetworkTroubleshooter(): void { root.openNetworkTroubleshooter() }
 
     // Ask AI is scriptable too, but it still goes through the confirmation
     // sheet -- an IPC caller cannot bypass consent.
@@ -776,14 +777,10 @@ Panel {
   }
 
   // ---------------------------------------------------------- keyboard nav
-  // One cursor, shared by keyboard and mouse, so the highlight is never
-  // ambiguous. The rows are the two actions; findings are listed, not walked.
-  // The actions come first because they are what a user opens the panel to do.
+  // One cursor for the action buttons. Findings are read without a cursor.
   property bool cursorActive: false
   property int selectedIndex: -1
-  // Three actions: full diagnosis, copy report, ask AI. Ask AI is last because
-  // it is the only one that can leave the machine.
-  readonly property int rowCount: 3
+  readonly property int rowCount: root.showNetworkTroubleshooter ? 4 : 3
 
   function moveCursor(dy) {
     var n = root.rowCount
@@ -803,7 +800,41 @@ Panel {
     if (!root.cursorActive) return
     if (root.selectedIndex === 0) root.refresh("full", true)
     else if (root.selectedIndex === 1) root.copyReport()
-    else root.askAi()
+    else if (root.selectedIndex === 2) root.askAi()
+    else if (root.selectedIndex === 3) root.openNetworkTroubleshooter()
+  }
+
+  readonly property string networkAppSetting: String(root.setting("networkTroubleshooterDesktopId", "auto") || "").trim()
+  readonly property string networkDesktopId: root.networkAppSetting === "auto"
+    ? "io.github.muness.NetworkTroubleshooter"
+    : root.networkAppSetting.replace(/\.desktop$/, "")
+  readonly property bool networkAppInstalled: {
+    const entries = DesktopEntries.applications.values
+    for (let i = 0; i < entries.length; i++)
+      if (entries[i].id === root.networkDesktopId) return true
+    return false
+  }
+  readonly property bool showNetworkTroubleshooter: root.networkDesktopId !== ""
+    && (root.networkAppSetting !== "auto" || root.networkAppInstalled)
+
+  function openNetworkTroubleshooter() {
+    if (!root.showNetworkTroubleshooter || networkLaunch.running) return
+    if (!root.networkAppInstalled) {
+      root.notify("OmaDoctor", "Network troubleshooter app not found. Check its desktop app ID in the widget settings.",
+                  Model.glyph("info"), "normal")
+      return
+    }
+    networkLaunch.command = ["/usr/bin/gtk-launch", "--", root.networkDesktopId + ".desktop"]
+    networkLaunch.running = true
+  }
+
+  Process {
+    id: networkLaunch
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.close()
+      else root.notify("OmaDoctor", "Could not open the network troubleshooter.",
+                       Model.glyph("info"), "normal")
+    }
   }
 
   // ================================================================= Ask AI
@@ -1184,8 +1215,10 @@ Panel {
     // lines rather than more lines. fittedContentWidth/Height cap both to the
     // screen, so this degrades safely on a small display rather than
     // overflowing it.
-    contentWidth: panel.fittedContentWidth(
-      root.aiConfirmOpened ? Style.space(760) : Style.space(420))
+    contentWidth: panel.fittedContentWidth(root.aiConfirmOpened ? Style.space(760)
+      : root.showNetworkTroubleshooter ? Math.max(Style.space(420), actionRow.naturalWidth
+        + 2 * panel.padding + Border.left(panel.borderSpec) + Border.right(panel.borderSpec))
+      : Style.space(420))
     contentHeight: panel.fittedContentHeight(
       root.aiConfirmOpened ? Style.space(560) : body.implicitHeight)
 
@@ -1289,8 +1322,7 @@ Panel {
           PanelSeparator { width: parent.width; foreground: root.foreground }
 
           // ------------------------------------------------- action buttons
-          // Labelled Buttons rather than icon-only PanelActionButtons. Three
-          // labelled buttons read as obvious actions without a tooltip round-trip.
+          // Labelled buttons keep the available actions visible at a glance.
           //
           // Emphasis is a LOW-ALPHA accent tint, never a solid accent fill:
           // Button paints its own label in `foreground`, and this theme has
@@ -1302,30 +1334,20 @@ Panel {
             spacing: Style.spacing.sm
             width: parent.width
 
-            // A QML Row gives every child its implicitWidth and puts whatever
-            // is left over at the TRAILING edge, so a full-width Row still ends
-            // with dead space after the last button. Sharing the leftover fixes
-            // that, and shares it in PROPORTION to each button's natural width
-            // rather than splitting it into equal thirds: "Run full diagnosis"
-            // needs ~180px and "Ask AI" needs ~90px, so equal thirds would clip
-            // the first label's text while handing the third button slack it
-            // cannot use.
-            //
-            // slack is clamped at 0. A theme with a larger font can push the
-            // three natural widths past the row; in that case the buttons keep
-            // their natural size and overflow exactly as they did before,
-            // rather than every label being squeezed into a too-small box.
             readonly property real naturalTotal:
               fullButton.implicitWidth + copyButton.implicitWidth + aiButton.implicitWidth
-            readonly property real slack: Math.max(0, width - naturalTotal - spacing * 2)
-            // Share of the leftover this button's natural width represents.
-            function share(of) {
-              return slack * (of / Math.max(1, naturalTotal))
+              + (root.showNetworkTroubleshooter ? networkButton.implicitWidth : 0)
+            readonly property real gaps: spacing * (root.rowCount - 1)
+            readonly property real naturalWidth: naturalTotal + gaps
+
+            // Keep the row on one line when the screen caps the panel width.
+            function buttonWidth(natural) {
+              return Math.max(0, width - gaps) * natural / Math.max(1, naturalTotal)
             }
 
             Button {
               id: fullButton
-              width: implicitWidth + actionRow.share(implicitWidth)
+              width: actionRow.buttonWidth(implicitWidth)
               iconText: "󰃬"
               text: "Run full diagnosis"
               tooltipText: "Run full diagnosis (includes network)"
@@ -1342,7 +1364,7 @@ Panel {
 
             Button {
               id: copyButton
-              width: implicitWidth + actionRow.share(implicitWidth)
+              width: actionRow.buttonWidth(implicitWidth)
               iconText: "󰅏"
               text: "Copy report"
               tooltipText: "Copy redacted report"
@@ -1359,7 +1381,7 @@ Panel {
 
             Button {
               id: aiButton
-              width: implicitWidth + actionRow.share(implicitWidth)
+              width: actionRow.buttonWidth(implicitWidth)
               iconText: "󰚩"
               text: "Ask AI"
               tooltipText: root.resolvedAiCommand !== ""
@@ -1374,6 +1396,23 @@ Panel {
               horizontalPadding: Style.spacing.controlPaddingX - Style.space(2)
               verticalPadding: Style.spacing.controlPaddingY - Style.space(1)
               onClicked: root.askAi()
+            }
+            Button {
+              id: networkButton
+              visible: root.showNetworkTroubleshooter
+              width: actionRow.buttonWidth(implicitWidth)
+              iconText: "󰈀"
+              text: "Network"
+              tooltipText: "Open the network troubleshooter"
+              foreground: root.foreground
+              accent: root.accent
+              bordered: true
+              enabled: !networkLaunch.running
+              hasCursor: root.cursorActive && root.selectedIndex === 3
+              fontSize: Style.font.bodySmall
+              horizontalPadding: Style.spacing.controlPaddingX - Style.space(2)
+              verticalPadding: Style.spacing.controlPaddingY - Style.space(1)
+              onClicked: root.openNetworkTroubleshooter()
             }
           }
 
