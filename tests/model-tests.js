@@ -21,7 +21,7 @@ const EXPORTS = [
   "findCheck", "weight", "normStatus", "fmtAge", "glyph", "stateLabel", "redact", "buildReport",
   "buildReportText", "findingRows", "allFindingRows", "strArray", "normRepair",
   "shouldNotify", "notificationText", "diffScans", "changeSummary", "redactGaps",
-  "summaryLine", "breakdownLine"
+  "summaryLine", "breakdownLine", "resolveAiCommand"
 ];
 
 const ctx = vm.createContext({ JSON, Math, String, Number, Array, Object, isFinite, Date });
@@ -71,6 +71,27 @@ function eqThrows(name, fn) {
   if (threw) fail(name, `threw: ${detail}`);
   else ok(name);
 }
+
+// ----------------------------------------------------------- resolveAiCommand
+
+const aiCandidates = ["opencode", "gemini", "claude -p", "codex exec"];
+const installedAi = { opencode: true, gemini: true, claude: true, codex: true };
+eq("explicit widget command wins over the Omarchy default", "aichat",
+  M.resolveAiCommand("aichat", "claude", aiCandidates, installedAi, ""));
+eq("installed Claude default wins over OpenCode", "claude -p",
+  M.resolveAiCommand("", "claude", aiCandidates, installedAi, ""));
+eq("Codex default resolves to its stdin command", "codex exec",
+  M.resolveAiCommand("", "codex", aiCandidates, installedAi, ""));
+eq("missing default binary falls back to the first installed CLI", "opencode",
+  M.resolveAiCommand("", "claude", aiCandidates, { opencode: true }, ""));
+eq("unsupported default falls back to discovery", "opencode",
+  M.resolveAiCommand("", "pi", aiCandidates, installedAi, ""));
+eq("unset default preserves discovery order", "opencode",
+  M.resolveAiCommand("", "", aiCandidates, installedAi, ""));
+eq("Ollama fallback requires a configured model", "ollama run llama3.2",
+  M.resolveAiCommand("", "", aiCandidates, { ollama: true }, "llama3.2"));
+eq("Ollama without a model leaves the copy-only fallback", "",
+  M.resolveAiCommand("", "", aiCandidates, { ollama: true }, ""));
 
 // --------------------------------------------------------------- parseDoctor
 

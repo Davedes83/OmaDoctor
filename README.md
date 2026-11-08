@@ -148,11 +148,13 @@ The third action hands the redacted report to **your** AI and asks it to
 research each finding and propose a fix. It exists because the person reading a
 diagnostic report often does not already know the answer.
 
-**It uses your assistant, not a specific one.** On startup the plugin probes
-your `PATH` for `opencode`, `mods`, `llm`, `aichat`, `fabric`, `aider`,
-`gemini`, `claude`, `codex` and `ollama`, in that order, and uses the first one
-it finds. Anything it does not know about still works — see `askAiCommand`
-below. You can see what it resolved to from the button's tooltip, or:
+Ask AI uses `askAiCommand` when set. Otherwise it prefers Omarchy's default
+agent if the plugin supports it and finds its executable on `PATH`. For
+example, Claude resolves to `claude -p` and Codex to `codex exec`. If the
+default is unset, unavailable, or unsupported, the plugin checks `PATH` in
+this order: `opencode`, `mods`, `llm`, `aichat`, `fabric`, `aider`, `gemini`,
+`claude`, `codex`, and `ollama` (when a model is configured). You can see
+the selection in the button's tooltip or with this command.
 
 ```sh
 qs ipc -p "$OMARCHY_PATH/shell" call davedes.omadoctor state | jq .ai
@@ -173,16 +175,16 @@ Then **Send**, **Copy** (puts the prompt on the clipboard instead, for pasting
 into anything), or **Esc**. If no supported CLI is found it says so and copies
 the prompt rather than doing nothing.
 
-On **Send** the assistant launches as its own application (via `setsid
-uwsm-app`, so it is a first-class process of your session, not a child of your
-terminal), with the redacted prompt on its stdin. The prompt and the AI's best
-optional output log live under `~/.local/state/omadoctor/`.
+For CLI assistants, **Send** stages the redacted prompt under
+`~/.local/state/omadoctor/` and opens the assistant in your terminal. Most
+commands read the prompt from stdin. OpenCode receives a reference to the
+staged file through `--prompt`.
 
 ### Settings
 
 | key | default | meaning |
 |---|---|---|
-| `askAiCommand` | `""` | full command line, e.g. `ollama run llama3.2`. The report is fed on **stdin**. Empty means auto-detect. |
+| `askAiCommand` | `""` | CLI command, e.g. `ollama run llama3.2`. The prompt is fed on stdin. Empty means prefer Omarchy's default agent. |
 | `askAiModel` | `""` | model name, for assistants that require one. `ollama run` has no default-model mode. |
 
 Anything not in the built-in list works through `askAiCommand`. The command line

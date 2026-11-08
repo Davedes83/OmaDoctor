@@ -767,6 +767,7 @@ Panel {
     if (opened) {
       cursorActive = false
       selectedIndex = -1
+      defaultAgentFile.reload()
       refresh("full", true)
     } else {
       // Closing hands the pointer back to the desktop; without this a row would
@@ -813,11 +814,8 @@ Panel {
   // user has installed, asks it to research the problem and propose a fix, and
   // puts the answer where they can read it.
   //
-  // It is discover-first, not opencode-first. Hardcoding one assistant would
-  // make the plugin useless for everyone who does not have that one installed,
-  // so the AI is resolved from the user's own PATH at runtime -- probed once at
-  // startup, off the UI thread -- and can be overridden with a single setting
-  // for anything this list does not know about.
+  // Use an explicit widget setting first, then Omarchy's selected agent if
+  // supported, and finally discover a supported assistant on the user's PATH.
   //
   // Privacy posture, stated plainly because it is the whole tension here: this
   // plugin promises nothing leaves the machine, and an AI query does. So nothing
@@ -841,28 +839,25 @@ Panel {
     "codex exec"
   ]
 
-  // Probed once at startup, under the hardened PATH so a shadow executable on
-  // the interactive PATH can never be what gets run. Maps command name -> true.
+  // Probed once at startup using the user's PATH. Maps command name -> true.
   property var aiOnPath: ({})
+  property string omarchyDefaultAgent: ""
+
+  FileView {
+    id: defaultAgentFile
+    path: (Quickshell.env("HOME") || "") + "/.config/omarchy/defaults/agent"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.omarchyDefaultAgent = text().split("\n")[0].trim()
+    onLoadFailed: root.omarchyDefaultAgent = ""
+  }
 
   readonly property string aiModel: String(root.setting("askAiModel", "") || "")
   readonly property string aiOverride: String(root.setting("askAiCommand", "") || "").trim()
 
-  readonly property string resolvedAiCommand: {
-    if (root.aiOverride !== "") return root.aiOverride
-    for (var i = 0; i < root.aiCandidates.length; i++) {
-      var line = root.aiCandidates[i]
-      var bin = line.split(" ")[0]
-      if (!root.aiOnPath[bin]) continue
-      return line
-    }
-    // ollama is probed for, but unlike the candidates above it has no
-    // "use the default model" mode, so it can only be selected when a
-    // model has been configured. Without one, skip it rather than guess.
-    if (root.aiOnPath["ollama"] && root.aiModel !== "")
-      return "ollama run " + root.aiModel
-    return ""
-  }
+  readonly property string resolvedAiCommand: Model.resolveAiCommand(
+    root.aiOverride, root.omarchyDefaultAgent, root.aiCandidates, root.aiOnPath, root.aiModel)
 
   function probeAi() {
     var found = {}
@@ -1002,6 +997,7 @@ Panel {
       return
     }
     root.aiPendingPrompt = root.askAiPrompt()
+    root.aiPendingCommand = root.resolvedAiCommand
     root.aiConfirmOpened = true
   }
 
@@ -1028,8 +1024,8 @@ Panel {
   }
 
   function runAi() {
-    var argv = root.splitCommand(root.resolvedAiCommand)
-    if (argv.length === 0) return
+    if (!root.aiConfirmOpened || root.aiRunning) return
+    if (root.splitCommand(root.aiPendingCommand).length === 0) return
     root.aiConfirmOpened = false
     root.aiRunning = true
     // Stage the prompt on disk: the AI runs in a terminal, not a hidden pipe,
@@ -1045,7 +1041,7 @@ Panel {
   // The staged prompt file is the hand-off, so the report never appears in
   // argv (world-readable in /proc).
   function launchAiInTerminal() {
-    var argv = root.splitCommand(root.resolvedAiCommand)
+    var argv = root.splitCommand(root.aiPendingCommand)
     if (argv.length === 0) { root.aiRunning = false; return }
     var bin = String(argv[0]).split("/").pop()
     var script
@@ -1068,7 +1064,7 @@ Panel {
     aiLaunchProc.running = true
     root.aiRunning = false
     root.notify("OmaDoctor",
-      "Sent the report to " + root.resolvedAiCommand + ".",
+      "Sent the report to " + root.aiPendingCommand + ".",
       Model.glyph("ok"), "normal")
   }
 
@@ -1090,6 +1086,7 @@ Panel {
   }
 
   property string aiPendingPrompt: ""
+  property string aiPendingCommand: ""
   property bool aiConfirmOpened: false
   property bool aiRunning: false
   readonly property string aiAnswerPath: root.stateDir + "/ai-answer.txt"
@@ -1644,7 +1641,7 @@ Panel {
 
               Text {
                 width: parent.width
-                text: "Command:  " + root.resolvedAiCommand
+                text: "Command:  " + root.aiPendingCommand
                 color: root.accent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -1655,10 +1652,10 @@ Panel {
 
               Text {
                 width: parent.width
-                text: root.resolvedAiCommand.indexOf("ollama ") === 0
+                text: root.aiPendingCommand.indexOf("ollama ") === 0
                   ? "A LOCAL model runs this. Nothing leaves your machine."
                   : "This sends the redacted report to a remote provider. Read it before you continue."
-                color: root.resolvedAiCommand.indexOf("ollama ") === 0
+                color: root.aiPendingCommand.indexOf("ollama ") === 0
                   ? root.foreground : root.urgent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
