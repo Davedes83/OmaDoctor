@@ -6,6 +6,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "Model.js" as Model
 
 // OmaDoctor -- a bar widget that runs read-only diagnostics and explains what
@@ -115,9 +116,9 @@ Panel {
     root.setSetting("pollSeconds", root.pollMs > 0 ? 0 : 300)
   }
 
-  readonly property color foreground: bar ? bar.barForeground : Color.foreground
-  readonly property color accent: Color.accent
-  readonly property color urgent: Color.urgent
+  readonly property color foreground: Commons.ThemeColor.popups.text
+  readonly property color accent: Commons.ThemeColor.accent
+  readonly property color urgent: Commons.ThemeColor.urgent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   // Glyph and colour follow the worst-wins state, never a percentage. A
@@ -1280,7 +1281,7 @@ Panel {
             // The summary does not carry the direction, so take it from the
             // diff itself rather than guessing from the wording.
             color: root.lastDiff && root.lastDiff.worse.length > 0
-              ? root.accent : Qt.darker(root.foreground, 1.3)
+              ? root.accent : root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap
@@ -1499,7 +1500,7 @@ Panel {
               horizontalAlignment: Text.AlignHCenter
               visible: Model.breakdownLine(root.totals) !== ""
               text: Model.breakdownLine(root.totals)
-              color: Qt.darker(root.foreground, 1.35)
+              color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               elide: Text.ElideRight
@@ -1511,7 +1512,7 @@ Panel {
             width: parent.width
             visible: !root.ready
             text: "No scan data yet."
-            color: Qt.darker(root.foreground, 1.4)
+            color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
           }
@@ -1572,20 +1573,8 @@ Panel {
         id: aiSheet
         anchors.fill: parent
         visible: root.aiConfirmOpened
-        // FULLY OPAQUE, and on the popup surface rather than Color.background.
-        //
-        // Util.alpha(c, a) SETS alpha to a -- it does not multiply -- so the
-        // previous Util.alpha(Color.background, 0.94) meant 6% of whatever was
-        // behind the sheet showed through, and on a bright wallpaper that
-        // bleed-through was plainly readable as ghosting behind the prompt.
-        //
-        // Color.popups.background is what the card underneath is painted with
-        // (see PopupCard: `color: Color.popups.background`), so using it makes
-        // the seam between sheet and card invisible. The alpha is forced to 1
-        // on top of that, because a theme may set popups.background-alpha below
-        // 1.0 for the card's sake -- but a consent dialog must not be see-through
-        // whatever the theme says.
-        color: Util.alpha(Color.popups.background, 1.0)
+        // Match the popup palette and keep the consent sheet opaque.
+        color: Util.alpha(Commons.ThemeColor.popups.background, 1.0)
         borderSpec: Border.flat(root.accent, Style.normalBorderWidth)
         radius: Style.cornerRadius
 
@@ -1720,7 +1709,7 @@ Panel {
               anchors.bottom: aiActions.top
               anchors.bottomMargin: Style.spacing.sm
               text: "Enter sends   ·   c copies the prompt instead   ·   Esc cancels"
-              color: Qt.darker(root.foreground, 1.4)
+              color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
@@ -1844,7 +1833,7 @@ Panel {
           width: parent.width
           visible: findingRow.isCheck && findingRow.check.value !== ""
           text: findingRow.isCheck ? findingRow.check.value : ""
-          color: Qt.darker(root.foreground, 1.25)
+          color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
           elide: Text.ElideRight
@@ -1857,7 +1846,7 @@ Panel {
           width: parent.width
           visible: findingRow.isCheck && findingRow.check.detail !== ""
           text: findingRow.isCheck ? findingRow.check.detail : ""
-          color: Qt.darker(root.foreground, 1.5)
+          color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
