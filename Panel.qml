@@ -120,6 +120,13 @@ Panel {
   readonly property color urgent: Color.urgent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
+  // Refined surface colors for a premium look. A muted text color for
+  // secondary detail lines keeps the visual hierarchy calm: findings and
+  // actions stay in foreground, supporting evidence steps back.
+  readonly property color muted: Qt.darker(foreground, 1.25)
+  readonly property color subtle: Qt.darker(foreground, 1.5)
+  readonly property color surfaceFill: Util.alpha(foreground, 0.04)
+
   // Glyph and colour follow the worst-wins state, never a percentage. A
   // healthy machine and a machine with one unreadable thing must not look
   // alike, so "ok" is its own distinct state rather than a percentage.
@@ -1253,12 +1260,12 @@ Panel {
             meta: root.scanning
               ? "scanning…"
               : (root.ready
-                ? root.totals.total + " checks - " +
-                  (root.issueCount > 0 ? root.issueCount + " need attention" : "nothing to review")
+                ? root.totals.total + " checks" +
+                  (root.issueCount > 0 ? "  ·  " + root.issueCount + " to review" : "  ·  all clear")
                 : "running first scan")
             detail: root.ready
               ? Model.fmtAge(Number(root.scan.ts || 0), root.nowSec) +
-                (root.lastMode === "full" ? " · full" : " · quick")
+                (root.lastMode === "full" ? "  ·  full diagnosis" : "  ·  quick scan")
               : ""
             iconComponent: Component {
               Text {
@@ -1266,7 +1273,7 @@ Panel {
                 textFormat: Text.PlainText
                 color: root.stateColor
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.display
+                font.pixelSize: Style.font.displayLarge
               }
             }
           }
@@ -1295,9 +1302,9 @@ Panel {
             // The summary does not carry the direction, so take it from the
             // diff itself rather than guessing from the wording.
             color: root.lastDiff && root.lastDiff.worse.length > 0
-              ? root.accent : Qt.darker(root.foreground, 1.3)
+              ? root.urgent : root.muted
             font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
+            font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
           }
 
@@ -1346,12 +1353,12 @@ Panel {
               tooltipText: "Run full diagnosis (includes network)"
               foreground: root.foreground
               accent: root.accent
-              background: Util.alpha(root.accent, 0.10)
+              background: Util.alpha(root.accent, 0.08)
               bordered: true
               hasCursor: root.cursorActive && root.selectedIndex === 0
-              fontSize: Style.font.bodySmall
-              horizontalPadding: Style.spacing.controlPaddingX - Style.space(2)
-              verticalPadding: Style.spacing.controlPaddingY - Style.space(1)
+              fontSize: Style.font.body
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY
               onClicked: root.refresh("full", true)
             }
 
@@ -1366,9 +1373,9 @@ Panel {
               bordered: true
               enabled: root.ready
               hasCursor: root.cursorActive && root.selectedIndex === 1
-              fontSize: Style.font.bodySmall
-              horizontalPadding: Style.spacing.controlPaddingX - Style.space(2)
-              verticalPadding: Style.spacing.controlPaddingY - Style.space(1)
+              fontSize: Style.font.body
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY
               onClicked: root.copyReport()
             }
 
@@ -1385,9 +1392,9 @@ Panel {
               bordered: true
               enabled: root.ready && !root.aiRunning
               hasCursor: root.cursorActive && root.selectedIndex === 2
-              fontSize: Style.font.bodySmall
-              horizontalPadding: Style.spacing.controlPaddingX - Style.space(2)
-              verticalPadding: Style.spacing.controlPaddingY - Style.space(1)
+              fontSize: Style.font.body
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY
               onClicked: root.askAi()
             }
           }
@@ -1421,7 +1428,9 @@ Panel {
                 foreground: root.foreground
                 accent: root.accent
                 bordered: true
-                fontSize: Style.font.bodySmall
+                fontSize: Style.font.body
+                horizontalPadding: Style.spacing.controlPaddingX
+                verticalPadding: Style.spacing.controlPaddingY
                 onClicked: root.togglePolling()
               }
             }
@@ -1440,7 +1449,9 @@ Panel {
                 foreground: root.foreground
                 accent: root.accent
                 bordered: true
-                fontSize: Style.font.bodySmall
+                fontSize: Style.font.body
+                horizontalPadding: Style.spacing.controlPaddingX
+                verticalPadding: Style.spacing.controlPaddingY
                 onClicked: root.toggleNotifications()
               }
             }
@@ -1459,7 +1470,9 @@ Panel {
                 foreground: root.foreground
                 accent: root.accent
                 bordered: true
-                fontSize: Style.font.bodySmall
+                fontSize: Style.font.body
+                horizontalPadding: Style.spacing.controlPaddingX
+                verticalPadding: Style.spacing.controlPaddingY
                 onClicked: root.showAllChecks = !root.showAllChecks
               }
             }
@@ -1487,7 +1500,7 @@ Panel {
             // left of the panel, not crammed under the separator.
             topPadding: Style.spacing.huge
             bottomPadding: Style.spacing.huge
-            spacing: Style.spacing.sm
+            spacing: Style.spacing.md
 
             Text {
               width: parent.width
@@ -1514,7 +1527,7 @@ Panel {
               horizontalAlignment: Text.AlignHCenter
               visible: Model.breakdownLine(root.totals) !== ""
               text: Model.breakdownLine(root.totals)
-              color: Qt.darker(root.foreground, 1.35)
+              color: root.muted
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               elide: Text.ElideRight
@@ -1526,7 +1539,7 @@ Panel {
             width: parent.width
             visible: !root.ready
             text: "No scan data yet."
-            color: Qt.darker(root.foreground, 1.4)
+            color: root.subtle
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
           }
@@ -1544,8 +1557,8 @@ Panel {
               // A header needs breathing room above it; a check row only needs
               // a hairline gap from the one above it.
               spacing: 0
-              topPadding: modelData.kind === "header" ? Style.spacing.lg : 0
-              bottomPadding: modelData.kind === "check" ? Style.spacing.xs : 0
+              topPadding: modelData.kind === "header" ? Style.spacing.xxl : 0
+              bottomPadding: modelData.kind === "check" ? Style.spacing.sm : 0
 
               PanelSectionHeader {
                 width: parent.width
@@ -1639,14 +1652,14 @@ Panel {
           Item {
             id: aiSheetBody
             anchors.fill: parent
-            anchors.margins: Style.space(16)
+            anchors.margins: Style.space(18)
 
             Column {
               id: aiHeader
               anchors.top: parent.top
               anchors.left: parent.left
               anchors.right: parent.right
-              spacing: Style.spacing.sm
+              spacing: Style.spacing.md
 
               Text {
                 width: parent.width
@@ -1662,7 +1675,7 @@ Panel {
                 text: "Command:  " + root.resolvedAiCommand
                 color: root.accent
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: Style.font.body
                 wrapMode: Text.WrapAnywhere
                 elide: Text.ElideRight
                 maximumLineCount: 2
@@ -1674,7 +1687,7 @@ Panel {
                   ? "A LOCAL model runs this. Nothing leaves your machine."
                   : "This sends the redacted report to a remote provider. Read it before you continue."
                 color: root.resolvedAiCommand.indexOf("ollama ") === 0
-                  ? root.foreground : root.urgent
+                  ? root.muted : root.urgent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 wrapMode: Text.WordWrap
@@ -1691,20 +1704,20 @@ Panel {
             BorderSurface {
               id: aiPreviewBox
               anchors.top: aiHeader.bottom
-              anchors.topMargin: Style.spacing.md
+              anchors.topMargin: Style.spacing.lg
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.bottom: aiFooter.top
-              anchors.bottomMargin: Style.spacing.md
-              color: Util.alpha(root.foreground, 0.06)
+              anchors.bottomMargin: Style.spacing.lg
+              color: root.surfaceFill
               radius: Style.cornerRadius
-              borderSpec: Border.flat(Util.alpha(root.foreground, 0.15), 1)
+              borderSpec: Border.flat(Util.alpha(root.foreground, 0.10), 1)
               clip: true
 
               Flickable {
                 id: aiPreviewScroll
                 anchors.fill: parent
-                anchors.margins: Style.space(6)
+                anchors.margins: Style.space(8)
                 contentHeight: aiPreviewText.implicitHeight
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
@@ -1733,9 +1746,9 @@ Panel {
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.bottom: aiActions.top
-              anchors.bottomMargin: Style.spacing.sm
+              anchors.bottomMargin: Style.spacing.md
               text: "Enter sends   ·   c copies the prompt instead   ·   Esc cancels"
-              color: Qt.darker(root.foreground, 1.4)
+              color: root.subtle
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
@@ -1746,33 +1759,39 @@ Panel {
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.bottom: parent.bottom
-              spacing: Style.spacing.sm
+              spacing: Style.spacing.md
 
               Button {
-                width: Math.max(1, (parent.width - Style.spacing.sm * 2) / 3)
+                width: Math.max(1, (parent.width - Style.spacing.md * 2) / 3)
                 text: "Send"
                 bordered: true
                 foreground: root.foreground
                 accent: root.accent
-                fontSize: Style.font.bodySmall
+                fontSize: Style.font.body
+                horizontalPadding: Style.spacing.controlPaddingX
+                verticalPadding: Style.spacing.controlPaddingY
                 onClicked: root.runAi()
               }
               Button {
-                width: Math.max(1, (parent.width - Style.spacing.sm * 2) / 3)
+                width: Math.max(1, (parent.width - Style.spacing.md * 2) / 3)
                 text: "Copy"
                 bordered: true
                 foreground: root.foreground
                 accent: root.accent
-                fontSize: Style.font.bodySmall
+                fontSize: Style.font.body
+                horizontalPadding: Style.spacing.controlPaddingX
+                verticalPadding: Style.spacing.controlPaddingY
                 onClicked: { root.copyAiPrompt(); root.cancelAi() }
               }
               Button {
-                width: Math.max(1, (parent.width - Style.spacing.sm * 2) / 3)
+                width: Math.max(1, (parent.width - Style.spacing.md * 2) / 3)
                 text: "Cancel"
                 bordered: true
                 foreground: root.foreground
                 accent: root.accent
-                fontSize: Style.font.bodySmall
+                fontSize: Style.font.body
+                horizontalPadding: Style.spacing.controlPaddingX
+                verticalPadding: Style.spacing.controlPaddingY
                 onClicked: root.cancelAi()
               }
             }
@@ -1818,30 +1837,30 @@ Panel {
     currentFill: Style.selectedFillFor(root.foreground, root.stateColor)
     radius: Style.cornerRadius
 
-    implicitHeight: findingInner.implicitHeight + Style.spacing.xl
+    implicitHeight: findingInner.implicitHeight + Style.spacing.lg
 
     Row {
       id: findingInner
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(6)
-      anchors.rightMargin: Style.space(6)
-      spacing: Style.spacing.sm
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.spacing.md
 
       Text {
-        width: Style.space(18)
+        width: Style.space(20)
         text: findingRow.isCheck ? Model.glyph(findingRow.check.status) : ""
         color: !findingRow.isCheck ? root.foreground
              : (findingRow.check.status === "problem" ? root.urgent
              : (findingRow.check.status === "attention" ? root.accent : root.foreground))
         font.family: root.fontFamily
-        font.pixelSize: Style.font.icon
+        font.pixelSize: Style.font.iconLarge
       }
 
       Column {
-        width: parent.width - Style.space(18) - Style.spacing.sm
-        spacing: 1
+        width: parent.width - Style.space(20) - Style.spacing.md
+        spacing: Style.spacing.xs
 
         Text {
           width: parent.width
@@ -1859,9 +1878,9 @@ Panel {
           width: parent.width
           visible: findingRow.isCheck && findingRow.check.value !== ""
           text: findingRow.isCheck ? findingRow.check.value : ""
-          color: Qt.darker(root.foreground, 1.25)
+          color: root.muted
           font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
+          font.pixelSize: Style.font.body
           elide: Text.ElideRight
           textFormat: Text.PlainText
         }
@@ -1872,9 +1891,9 @@ Panel {
           width: parent.width
           visible: findingRow.isCheck && findingRow.check.detail !== ""
           text: findingRow.isCheck ? findingRow.check.detail : ""
-          color: Qt.darker(root.foreground, 1.5)
+          color: root.subtle
           font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
+          font.pixelSize: Style.font.bodySmall
           wrapMode: Text.WordWrap
           textFormat: Text.PlainText
         }
@@ -1882,10 +1901,10 @@ Panel {
         Text {
           width: parent.width
           visible: findingRow.isCheck && findingRow.check.suggestion !== ""
-          text: findingRow.isCheck ? "-> " + findingRow.check.suggestion : ""
+          text: findingRow.isCheck ? "→ " + findingRow.check.suggestion : ""
           color: root.accent
           font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
+          font.pixelSize: Style.font.bodySmall
           wrapMode: Text.WordWrap
           textFormat: Text.PlainText
         }
