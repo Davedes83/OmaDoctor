@@ -120,12 +120,18 @@ Panel {
   readonly property color urgent: Color.urgent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  // Refined surface colors for a premium look. A muted text color for
-  // secondary detail lines keeps the visual hierarchy calm: findings and
-  // actions stay in foreground, supporting evidence steps back.
-  readonly property color muted: Qt.darker(foreground, 1.25)
-  readonly property color subtle: Qt.darker(foreground, 1.5)
-  readonly property color surfaceFill: Util.alpha(foreground, 0.04)
+  // Refined surface colours. `muted`/`subtle` step secondary text back so the
+  // hierarchy reads: finding title first, evidence second. `card*` are the
+  // shared tokens for the panel's card surfaces -- a low-alpha wash plus a
+  // hairline border, which is what separates a composed panel from a bare list
+  // of lines without hardcoding any theme colour.
+  readonly property color muted: Qt.darker(foreground, 1.35)
+  readonly property color subtle: Qt.darker(foreground, 1.6)
+  readonly property color surfaceFill: Util.alpha(foreground, 0.08)
+  readonly property color surfaceBorder: Util.alpha(foreground, 0.20)
+  readonly property color cardFill: Util.alpha(foreground, 0.08)
+  readonly property color cardBorder: Util.alpha(foreground, 0.28)
+  readonly property int cardBorderWidth: Math.max(1, Style.normalBorderWidth)
 
   // Glyph and colour follow the worst-wins state, never a percentage. A
   // healthy machine and a machine with one unreadable thing must not look
@@ -1207,7 +1213,7 @@ Panel {
     // screen, so this degrades safely on a small display rather than
     // overflowing it.
     contentWidth: panel.fittedContentWidth(
-      root.aiConfirmOpened ? Style.space(760) : Style.space(420))
+      root.aiConfirmOpened ? Style.space(760) : Style.space(450))
     contentHeight: panel.fittedContentHeight(
       root.aiConfirmOpened ? Style.space(560) : body.implicitHeight)
 
@@ -1248,32 +1254,62 @@ Panel {
         Column {
           id: body
           width: scroll.width
-          spacing: Style.spacing.lg
+          spacing: Style.spacing.xxl
 
           // ---------------------------------------------------------- hero
-          PanelHero {
-            id: hero
+          // Framed as a card: a low-alpha wash, a hairline border and a
+          // rounded badge behind the state glyph. This is the panel's anchor --
+          // it should read as a composed status block, not a line of text.
+          BorderSurface {
+            id: heroCard
             width: parent.width
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            title: root.ready ? Model.stateLabel(root.state) : "Checking..."
-            meta: root.scanning
-              ? "scanning…"
-              : (root.ready
-                ? root.totals.total + " checks" +
-                  (root.issueCount > 0 ? "  ·  " + root.issueCount + " to review" : "  ·  all clear")
-                : "running first scan")
-            detail: root.ready
-              ? Model.fmtAge(Number(root.scan.ts || 0), root.nowSec) +
-                (root.lastMode === "full" ? "  ·  full diagnosis" : "  ·  quick scan")
-              : ""
-            iconComponent: Component {
-              Text {
-                text: root.ready ? root.stateGlyph : ""
-                textFormat: Text.PlainText
-                color: root.stateColor
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.displayLarge
+            implicitHeight: hero.implicitHeight + Style.spacing.huge
+            color: Util.alpha(root.foreground, 0.17)
+            borderSpec: Border.flat(Util.alpha(root.stateColor, 0.60), root.cardBorderWidth)
+            radius: Style.cornerRadius
+
+            PanelHero {
+              id: hero
+              // Explicit width rather than left/right anchors: PanelHero owns
+              // its own `width: parent.width` binding, and anchoring would
+              // fight it.
+              x: Style.spacing.lg
+              width: heroCard.width - Style.spacing.lg * 2
+              anchors.verticalCenter: parent.verticalCenter
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              title: root.ready ? Model.stateLabel(root.state) : "Checking..."
+              meta: root.scanning
+                ? "scanning…"
+                : (root.ready
+                  ? root.totals.total + " checks" +
+                    (root.issueCount > 0 ? "  ·  " + root.issueCount + " to review" : "  ·  all clear")
+                  : "running first scan")
+              detail: root.ready
+                ? Model.fmtAge(Number(root.scan.ts || 0), root.nowSec) +
+                  (root.lastMode === "full" ? "  ·  full diagnosis" : "  ·  quick scan")
+                : ""
+              iconComponent: Component {
+                // A tinted ring behind the glyph. Antialiasing matters: a
+                // Rectangle circle without it is visibly jagged at this size.
+                Rectangle {
+                  width: Style.space(52)
+                  height: width
+                  radius: width / 2
+                  antialiasing: true
+                  color: Util.alpha(root.stateColor, 0.22)
+                  border.width: root.cardBorderWidth
+                  border.color: Util.alpha(root.stateColor, 0.60)
+
+                  Text {
+                    anchors.centerIn: parent
+                    text: root.ready ? root.stateGlyph : Model.glyph("info")
+                    textFormat: Text.PlainText
+                    color: root.stateColor
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.heading
+                  }
+                }
               }
             }
           }
@@ -1285,7 +1321,7 @@ Panel {
             text: "! " + root.lastError
             color: root.urgent
             font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
+            font.pixelSize: Style.font.body
             wrapMode: Text.WordWrap
           }
 
@@ -1304,98 +1340,75 @@ Panel {
             color: root.lastDiff && root.lastDiff.worse.length > 0
               ? root.urgent : root.muted
             font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
+            font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap
           }
 
           PanelSeparator { width: parent.width; foreground: root.foreground }
 
           // ------------------------------------------------- action buttons
-          // Labelled Buttons rather than icon-only PanelActionButtons. Three
-          // labelled buttons read as obvious actions without a tooltip round-trip.
+          // One segmented bar rather than three free-floating buttons. Equal
+          // thirds, a shared container, hairline gaps: the row reads as a single
+          // control surface instead of three chips of different widths.
           //
-          // Emphasis is a LOW-ALPHA accent tint, never a solid accent fill:
-          // Button paints its own label in `foreground`, and this theme has
-          // accent == foreground, so a solid accent fill would render the label
-          // invisible (light text on light background). The tint separates the
-          // primary without fighting the label.
-          Row {
-            id: actionRow
-            spacing: Style.spacing.sm
+          // Emphasis is a LOW-ALPHA accent tint, never a solid accent fill: the
+          // segment paints its own label in `foreground`, and this theme has
+          // accent == foreground, so a solid fill would render the label
+          // invisible. The tint separates the primary without fighting the text.
+          BorderSurface {
+            id: actionGroup
             width: parent.width
+            implicitHeight: Style.space(46)
+            color: root.cardFill
+            borderSpec: Border.flat(root.cardBorder, root.cardBorderWidth)
+            radius: Style.cornerRadius
 
-            // A QML Row gives every child its implicitWidth and puts whatever
-            // is left over at the TRAILING edge, so a full-width Row still ends
-            // with dead space after the last button. Sharing the leftover fixes
-            // that, and shares it in PROPORTION to each button's natural width
-            // rather than splitting it into equal thirds: "Run full diagnosis"
-            // needs ~180px and "Ask AI" needs ~90px, so equal thirds would clip
-            // the first label's text while handing the third button slack it
-            // cannot use.
-            //
-            // slack is clamped at 0. A theme with a larger font can push the
-            // three natural widths past the row; in that case the buttons keep
-            // their natural size and overflow exactly as they did before,
-            // rather than every label being squeezed into a too-small box.
-            readonly property real naturalTotal:
-              fullButton.implicitWidth + copyButton.implicitWidth + aiButton.implicitWidth
-            readonly property real slack: Math.max(0, width - naturalTotal - spacing * 2)
-            // Share of the leftover this button's natural width represents.
-            function share(of) {
-              return slack * (of / Math.max(1, naturalTotal))
-            }
+            Row {
+              id: actionRow
+              anchors.fill: parent
+              anchors.margins: Style.space(4)
+              spacing: Style.space(4)
 
-            Button {
-              id: fullButton
-              width: implicitWidth + actionRow.share(implicitWidth)
-              iconText: "󰃬"
-              text: "Run full diagnosis"
-              tooltipText: "Run full diagnosis (includes network)"
-              foreground: root.foreground
-              accent: root.accent
-              background: Util.alpha(root.accent, 0.08)
-              bordered: true
-              hasCursor: root.cursorActive && root.selectedIndex === 0
-              fontSize: Style.font.body
-              horizontalPadding: Style.spacing.controlPaddingX
-              verticalPadding: Style.spacing.controlPaddingY
-              onClicked: root.refresh("full", true)
-            }
+              // Equal thirds of the space actually inside the group, so the
+              // segments always fill it edge to edge whatever the theme's
+              // control padding is.
+              readonly property real segmentWidth:
+                Math.floor((width - spacing * 2) / 3)
 
-            Button {
-              id: copyButton
-              width: implicitWidth + actionRow.share(implicitWidth)
-              iconText: "󰅏"
-              text: "Copy report"
-              tooltipText: "Copy redacted report"
-              foreground: root.foreground
-              accent: root.accent
-              bordered: true
-              enabled: root.ready
-              hasCursor: root.cursorActive && root.selectedIndex === 1
-              fontSize: Style.font.body
-              horizontalPadding: Style.spacing.controlPaddingX
-              verticalPadding: Style.spacing.controlPaddingY
-              onClicked: root.copyReport()
-            }
+              ActionSegment {
+                width: actionRow.segmentWidth
+                height: actionRow.height
+                iconText: "󰃬"
+                label: "Full scan"
+                tooltipText: "Run full diagnosis (includes network)"
+                emphasised: true
+                hasCursor: root.cursorActive && root.selectedIndex === 0
+                onActivated: root.refresh("full", true)
+              }
 
-            Button {
-              id: aiButton
-              width: implicitWidth + actionRow.share(implicitWidth)
-              iconText: "󰚩"
-              text: "Ask AI"
-              tooltipText: root.resolvedAiCommand !== ""
-                ? "Send the redacted report to " + root.resolvedAiCommand
-                : "Copy a ready-to-paste prompt (no AI CLI found)"
-              foreground: root.foreground
-              accent: root.accent
-              bordered: true
-              enabled: root.ready && !root.aiRunning
-              hasCursor: root.cursorActive && root.selectedIndex === 2
-              fontSize: Style.font.body
-              horizontalPadding: Style.spacing.controlPaddingX
-              verticalPadding: Style.spacing.controlPaddingY
-              onClicked: root.askAi()
+              ActionSegment {
+                width: actionRow.segmentWidth
+                height: actionRow.height
+                iconText: "󰅏"
+                label: "Copy"
+                tooltipText: "Copy the redacted report"
+                enabled: root.ready
+                hasCursor: root.cursorActive && root.selectedIndex === 1
+                onActivated: root.copyReport()
+              }
+
+              ActionSegment {
+                width: actionRow.segmentWidth
+                height: actionRow.height
+                iconText: "󰚩"
+                label: "Ask AI"
+                tooltipText: root.resolvedAiCommand !== ""
+                  ? "Send the redacted report to " + root.resolvedAiCommand
+                  : "Copy a ready-to-paste prompt (no AI CLI found)"
+                enabled: root.ready && !root.aiRunning
+                hasCursor: root.cursorActive && root.selectedIndex === 2
+                onActivated: root.askAi()
+              }
             }
           }
 
@@ -1406,74 +1419,64 @@ Panel {
           // (bar.layout.<section>.pollSeconds / notifyOnProblem) but had no UI
           // -- togglePolling()/toggleNotifications() were defined and never
           // called. A settings row makes them discoverable.
+          //
+          // Presented as preference cards rather than three loose bordered
+          // buttons: label on the left, current state in a pill on the right,
+          // the whole row clickable. That reads as a settings list instead of a
+          // second toolbar competing with the actions above it.
           Column {
             width: parent.width
             spacing: Style.spacing.xs
-            topPadding: Style.spacing.sm
-            bottomPadding: Style.spacing.sm
 
-            // background polling toggle
-            Row {
+            PanelSectionHeader {
+              width: parent.width
+              text: "Preferences"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Column {
               width: parent.width
               spacing: Style.spacing.sm
-              Button {
-                width: implicitWidth
+              topPadding: Style.spacing.sm
+              bottomPadding: Style.spacing.sm
+
+              PrefRow {
+                width: parent.width
                 iconText: root.pollMs > 0 ? "󰓏" : "󰑓"
-                text: root.pollMs > 0
-                  ? "Polling every " + Math.round(root.pollMs / 1000) + "s"
-                  : "Background polling"
+                label: "Background polling"
+                stateText: root.pollMs > 0
+                  ? "Every " + Math.round(root.pollMs / 1000) + "s"
+                  : "Off"
+                isOn: root.pollMs > 0
                 tooltipText: root.pollMs > 0
                   ? "A quick scan runs every " + Math.round(root.pollMs / 1000) + " seconds.\nTurn off to scan only when you open the panel."
                   : "Turn on periodic quick scans so the bar glyph stays fresh."
-                foreground: root.foreground
-                accent: root.accent
-                bordered: true
-                fontSize: Style.font.body
-                horizontalPadding: Style.spacing.controlPaddingX
-                verticalPadding: Style.spacing.controlPaddingY
-                onClicked: root.togglePolling()
+                onActivated: root.togglePolling()
               }
-            }
 
-            // notifications toggle
-            Row {
-              width: parent.width
-              spacing: Style.spacing.sm
-              Button {
-                width: implicitWidth
+              PrefRow {
+                width: parent.width
                 iconText: root.notifyEnabled ? "󰂚" : "󰂛"
-                text: root.notifyEnabled ? "Notify on problems" : "Notifications off"
+                label: "Notify on problems"
+                stateText: root.notifyEnabled ? "On" : "Off"
+                isOn: root.notifyEnabled
                 tooltipText: root.notifyEnabled
                   ? "A worsening scan posts a notification once.\nTurn off to silence them."
                   : "Turn on to be notified when a scan finds a new problem."
-                foreground: root.foreground
-                accent: root.accent
-                bordered: true
-                fontSize: Style.font.body
-                horizontalPadding: Style.spacing.controlPaddingX
-                verticalPadding: Style.spacing.controlPaddingY
-                onClicked: root.toggleNotifications()
+                onActivated: root.toggleNotifications()
               }
-            }
 
-            // show-all-checks toggle
-            Row {
-              width: parent.width
-              spacing: Style.spacing.sm
-              Button {
-                width: implicitWidth
+              PrefRow {
+                width: parent.width
                 iconText: root.showAllChecks ? "󰍨" : "󰋖"
-                text: root.showAllChecks ? "Show findings only" : "Show all checks"
+                label: "Show every check"
+                stateText: root.showAllChecks ? "All" : "Findings"
+                isOn: root.showAllChecks
                 tooltipText: root.showAllChecks
-                  ? "Only checks that need attention are listed.\nTurn off to see every check the scan ran."
-                  : "Every check is listed, including passing ones.\nTurn on to hide the noise and show only findings."
-                foreground: root.foreground
-                accent: root.accent
-                bordered: true
-                fontSize: Style.font.body
-                horizontalPadding: Style.spacing.controlPaddingX
-                verticalPadding: Style.spacing.controlPaddingY
-                onClicked: root.showAllChecks = !root.showAllChecks
+                  ? "Every check is listed, including passing ones.\nTurn off to hide the noise and show only findings."
+                  : "Only checks that need attention are listed.\nTurn on to see every check the scan ran."
+                onActivated: root.showAllChecks = !root.showAllChecks
               }
             }
           }
@@ -1487,50 +1490,69 @@ Panel {
 
           // The all-clear state. When nothing needs review this is the WHOLE
           // panel body, so a lone muted sentence left it looking unfinished
-          // rather than calm. Instead: a large state glyph, a bold headline
-          // drawn from the actual counts, and the per-bucket breakdown -- so
-          // the healthy case reads as a composed result, not an absence.
+          // rather than calm. Instead: a card holding a ringed state badge, a
+          // bold headline drawn from the actual counts, and the per-bucket
+          // breakdown -- so the healthy case reads as a composed result, not an
+          // absence.
           //
           // Wording comes from Model.summaryLine/breakdownLine rather than being
           // hardcoded, so it can never disagree with the scan it describes.
-          Column {
+          BorderSurface {
             width: parent.width
             visible: root.ready && root.rows.length === 0
-            // Breathing room above and below: this block is centred in what is
-            // left of the panel, not crammed under the separator.
-            topPadding: Style.spacing.huge
-            bottomPadding: Style.spacing.huge
-            spacing: Style.spacing.md
+            implicitHeight: allClearInner.implicitHeight + Style.spacing.xxl * 2
+            color: root.cardFill
+            borderSpec: Border.flat(root.cardBorder, root.cardBorderWidth)
+            radius: Style.cornerRadius
 
-            Text {
-              width: parent.width
-              horizontalAlignment: Text.AlignHCenter
-              text: Model.glyph("ok")
-              color: root.stateColor
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.displayLarge
-            }
+            Column {
+              id: allClearInner
+              width: parent.width - Style.spacing.xl * 2
+              x: Style.spacing.xl
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.spacing.md
 
-            Text {
-              width: parent.width
-              horizontalAlignment: Text.AlignHCenter
-              text: Model.summaryLine(root.totals)
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.title
-              font.bold: true
-              elide: Text.ElideRight
-            }
+              Rectangle {
+                width: Style.space(54)
+                height: width
+                radius: width / 2
+                antialiasing: true
+                anchors.horizontalCenter: parent.horizontalCenter
+                color: Util.alpha(root.stateColor, 0.14)
+                border.width: root.cardBorderWidth
+                border.color: Util.alpha(root.stateColor, 0.40)
 
-            Text {
-              width: parent.width
-              horizontalAlignment: Text.AlignHCenter
-              visible: Model.breakdownLine(root.totals) !== ""
-              text: Model.breakdownLine(root.totals)
-              color: root.muted
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
+                Text {
+                  anchors.centerIn: parent
+                  text: Model.glyph("ok")
+                  textFormat: Text.PlainText
+                  color: root.stateColor
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.heading
+                }
+              }
+
+              Text {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                text: Model.summaryLine(root.totals)
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.heading
+                font.bold: true
+                elide: Text.ElideRight
+              }
+
+              Text {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                visible: Model.breakdownLine(root.totals) !== ""
+                text: Model.breakdownLine(root.totals)
+                color: root.muted
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideRight
+              }
             }
           }
 
@@ -1554,21 +1576,22 @@ Panel {
 
             Column {
               width: body.width
-              // A header needs breathing room above it; a check row only needs
-              // a hairline gap from the one above it.
+              // A header needs breathing room above it; a check card only needs
+              // a small gap from the one above it.
               spacing: 0
-              topPadding: modelData.kind === "header" ? Style.spacing.xxl : 0
+              topPadding: modelData.kind === "header" ? Style.spacing.xl : 0
               bottomPadding: modelData.kind === "check" ? Style.spacing.sm : 0
 
               PanelSectionHeader {
                 width: parent.width
                 visible: modelData.kind === "header"
+                // Model.findingRows/allFindingRows already upper-case the
+                // category; re-casing here would only mask a model change.
                 text: modelData.kind === "header" ? String(modelData.category) : ""
               }
 
-              // The check row is a real CursorSurface so it highlights on hover
-              // with the kit's own fill and border. Everything inside it is the
-              // previous content, unchanged -- only the wrapper is new.
+              // The check card. Everything inside it is the previous content,
+              // unchanged -- only the wrapper's chrome is new.
               FindingRow {
                 width: parent.width
                 visible: modelData.kind === "check"
@@ -1652,14 +1675,14 @@ Panel {
           Item {
             id: aiSheetBody
             anchors.fill: parent
-            anchors.margins: Style.space(18)
+            anchors.margins: Style.space(20)
 
             Column {
               id: aiHeader
               anchors.top: parent.top
               anchors.left: parent.left
               anchors.right: parent.right
-              spacing: Style.spacing.md
+              spacing: Style.spacing.lg
 
               Text {
                 width: parent.width
@@ -1689,7 +1712,7 @@ Panel {
                 color: root.resolvedAiCommand.indexOf("ollama ") === 0
                   ? root.muted : root.urgent
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
+                font.pixelSize: Style.font.bodySmall
                 wrapMode: Text.WordWrap
               }
             }
@@ -1704,20 +1727,20 @@ Panel {
             BorderSurface {
               id: aiPreviewBox
               anchors.top: aiHeader.bottom
-              anchors.topMargin: Style.spacing.lg
+              anchors.topMargin: Style.spacing.xl
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.bottom: aiFooter.top
-              anchors.bottomMargin: Style.spacing.lg
+              anchors.bottomMargin: Style.spacing.xl
               color: root.surfaceFill
               radius: Style.cornerRadius
-              borderSpec: Border.flat(Util.alpha(root.foreground, 0.10), 1)
+              borderSpec: Border.flat(root.surfaceBorder, 1)
               clip: true
 
               Flickable {
                 id: aiPreviewScroll
                 anchors.fill: parent
-                anchors.margins: Style.space(8)
+                anchors.margins: Style.space(10)
                 contentHeight: aiPreviewText.implicitHeight
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
@@ -1746,7 +1769,7 @@ Panel {
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.bottom: aiActions.top
-              anchors.bottomMargin: Style.spacing.md
+              anchors.bottomMargin: Style.spacing.lg
               text: "Enter sends   ·   c copies the prompt instead   ·   Esc cancels"
               color: root.subtle
               font.family: root.fontFamily
@@ -1759,39 +1782,39 @@ Panel {
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.bottom: parent.bottom
-              spacing: Style.spacing.md
+              spacing: Style.spacing.lg
 
               Button {
-                width: Math.max(1, (parent.width - Style.spacing.md * 2) / 3)
+                width: Math.max(1, (parent.width - Style.spacing.lg * 2) / 3)
                 text: "Send"
                 bordered: true
                 foreground: root.foreground
                 accent: root.accent
-                fontSize: Style.font.body
-                horizontalPadding: Style.spacing.controlPaddingX
-                verticalPadding: Style.spacing.controlPaddingY
+                  fontSize: Style.font.body
+                horizontalPadding: Style.spacing.controlPaddingX + Style.space(2)
+                verticalPadding: Style.spacing.controlPaddingY + Style.space(1)
                 onClicked: root.runAi()
               }
               Button {
-                width: Math.max(1, (parent.width - Style.spacing.md * 2) / 3)
+                width: Math.max(1, (parent.width - Style.spacing.lg * 2) / 3)
                 text: "Copy"
                 bordered: true
                 foreground: root.foreground
                 accent: root.accent
-                fontSize: Style.font.body
-                horizontalPadding: Style.spacing.controlPaddingX
-                verticalPadding: Style.spacing.controlPaddingY
+                  fontSize: Style.font.body
+                horizontalPadding: Style.spacing.controlPaddingX + Style.space(2)
+                verticalPadding: Style.spacing.controlPaddingY + Style.space(1)
                 onClicked: { root.copyAiPrompt(); root.cancelAi() }
               }
               Button {
-                width: Math.max(1, (parent.width - Style.spacing.md * 2) / 3)
+                width: Math.max(1, (parent.width - Style.spacing.lg * 2) / 3)
                 text: "Cancel"
                 bordered: true
                 foreground: root.foreground
                 accent: root.accent
-                fontSize: Style.font.body
-                horizontalPadding: Style.spacing.controlPaddingX
-                verticalPadding: Style.spacing.controlPaddingY
+                  fontSize: Style.font.body
+                horizontalPadding: Style.spacing.controlPaddingX + Style.space(2)
+                verticalPadding: Style.spacing.controlPaddingY + Style.space(1)
                 onClicked: root.cancelAi()
               }
             }
@@ -1803,16 +1826,20 @@ Panel {
 
   // ------------------------------------------------ reusable inline component
 
-  // One finding row: a hover-highlighted CursorSurface wrapping the check's
-  // glyph, title, value, evidence and suggested fix.
+  // One finding card: a low-alpha card surface with a state-coloured rail, the
+  // check's glyph, title, value, evidence, and the suggested fix in its own
+  // tinted chip.
   //
-  // An inline component (like SinkRow/SourceRow in the first-party audio panel)
-  // rather than a nested Repeater delegate, so it can be reasoned about as one
-  // unit and reused if the layout changes. It must NOT read containsMouse for
-  // its own fill or border -- the MouseArea below only writes the root's
-  // hoveredCheckId, and hasCursor is the single source of truth, which is what
-  // keeps exactly one row highlighted at a time.
-  component FindingRow: CursorSurface {
+  // It must NOT read containsMouse for its own fill or border -- the MouseArea
+  // below only writes the root's hoveredCheckId, and hasCursor is the single
+  // source of truth, which is what keeps exactly one row highlighted at a time.
+  //
+  // BorderSurface rather than CursorSurface: CursorSurface binds `color` to
+  // "transparent at rest", so a persistent card wash is impossible without
+  // overriding that binding (which would kill the hover paint). BorderSurface
+  // leaves `color` and `borderSpec` to the caller, and the hover visuals are
+  // derived from hasCursor exactly as before.
+  component FindingRow: BorderSurface {
     id: findingRow
 
     // The flat findingRows entry: { kind: "header" | "check", check }.
@@ -1825,41 +1852,61 @@ Panel {
     readonly property bool isCheck: !!rowData && rowData.kind === "check"
     readonly property var check: isCheck ? rowData.check : null
     readonly property string checkId: check ? String(check.id) : ""
+    readonly property string statusText: check ? String(check.status) : ""
+    readonly property color statusColor: !isCheck ? root.foreground
+      : (statusText === "problem" ? root.urgent
+      : (statusText === "attention" ? root.accent : root.foreground))
 
-    hasCursor: checkId !== "" && root.hoveredCheckId === checkId
+    // CursorSurface's hasCursor is not inherited here (this is a BorderSurface),
+    // so the same single-source-of-truth rule is spelled out locally: the only
+    // writer of root.hoveredCheckId is this row's MouseArea, and the paint reads
+    // this derived property -- never containsMouse.
+    readonly property bool hasCursor: checkId !== "" && root.hoveredCheckId === checkId
 
-    foreground: root.foreground
-    accent: root.stateColor
-    // Tint the hover with the row's own state so a problem row reads hotter on
-    // hover than an attention row, matching the glyph. CursorSurface already
-    // paints the hover-cursor border off hasCursor, so borderSpec is left to it.
-    fill: Style.hoverFillFor(root.foreground, root.stateColor)
-    currentFill: Style.selectedFillFor(root.foreground, root.stateColor)
+    color: hasCursor
+      ? Style.hoverFillFor(root.foreground, statusColor)
+      : root.cardFill
+    borderSpec: Border.flat(
+      hasCursor ? Util.alpha(statusColor, 0.45) : root.cardBorder,
+      root.cardBorderWidth)
     radius: Style.cornerRadius
 
-    implicitHeight: findingInner.implicitHeight + Style.spacing.lg
+    implicitHeight: findingInner.implicitHeight + Style.spacing.xxl
+
+    // The status rail: a slim rounded bar in the row's own state colour, so a
+    // problem card is identifiable from the rail without reading the text.
+    Rectangle {
+      id: findingRail
+      visible: findingRow.isCheck
+      width: Style.space(4)
+      height: Math.max(Style.space(14), findingInner.implicitHeight - Style.spacing.sm)
+      radius: width / 2
+      antialiasing: true
+      color: findingRow.statusColor
+      anchors.left: parent.left
+      anchors.leftMargin: Style.spacing.sm
+      anchors.verticalCenter: parent.verticalCenter
+    }
 
     Row {
       id: findingInner
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(10)
-      anchors.rightMargin: Style.space(10)
+      anchors.leftMargin: Style.spacing.sm + Style.space(3) + Style.spacing.md
+      anchors.rightMargin: Style.spacing.xl
       spacing: Style.spacing.md
 
       Text {
-        width: Style.space(20)
+        width: Style.space(22)
         text: findingRow.isCheck ? Model.glyph(findingRow.check.status) : ""
-        color: !findingRow.isCheck ? root.foreground
-             : (findingRow.check.status === "problem" ? root.urgent
-             : (findingRow.check.status === "attention" ? root.accent : root.foreground))
+        color: findingRow.statusColor
         font.family: root.fontFamily
         font.pixelSize: Style.font.iconLarge
       }
 
       Column {
-        width: parent.width - Style.space(20) - Style.spacing.md
+        width: parent.width - Style.space(22) - Style.spacing.md
         spacing: Style.spacing.xs
 
         Text {
@@ -1869,7 +1916,7 @@ Panel {
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
-          font.bold: findingRow.isCheck && findingRow.check.status === "problem"
+          font.bold: findingRow.isCheck && findingRow.statusText === "problem"
           elide: Text.ElideRight
           textFormat: Text.PlainText
         }
@@ -1880,7 +1927,7 @@ Panel {
           text: findingRow.isCheck ? findingRow.check.value : ""
           color: root.muted
           font.family: root.fontFamily
-          font.pixelSize: Style.font.body
+          font.pixelSize: Style.font.bodySmall
           elide: Text.ElideRight
           textFormat: Text.PlainText
         }
@@ -1898,15 +1945,29 @@ Panel {
           textFormat: Text.PlainText
         }
 
-        Text {
+        // The fix, in a tinted chip so it cannot be mistaken for more evidence.
+        BorderSurface {
           width: parent.width
           visible: findingRow.isCheck && findingRow.check.suggestion !== ""
-          text: findingRow.isCheck ? "→ " + findingRow.check.suggestion : ""
-          color: root.accent
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
-          textFormat: Text.PlainText
+          implicitHeight: suggestionText.implicitHeight + Style.spacing.sm
+          color: Util.alpha(root.accent, 0.18)
+          borderSpec: Border.flat(Util.alpha(root.accent, 0.45), root.cardBorderWidth)
+          radius: Style.cornerRadius
+
+          Text {
+            id: suggestionText
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: Style.spacing.sm
+            anchors.rightMargin: Style.spacing.sm
+            text: findingRow.isCheck && findingRow.check ? "→ " + findingRow.check.suggestion : ""
+            color: root.accent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+          }
         }
       }
     }
@@ -1925,6 +1986,177 @@ Panel {
           root.hoveredCheckId = ""
         }
       }
+    }
+  }
+
+  // One segment of the action bar: glyph + short label, sharing the bar's
+  // surface. Hover and keyboard cursor both paint the hover-cursor fill, so the
+  // segmented look stays consistent whether the pointer or the arrow keys are
+  // driving it. `emphasised` carries the primary action's accent tint.
+  component ActionSegment: BorderSurface {
+    id: segment
+
+    property string iconText: ""
+    property string label: ""
+    property string tooltipText: ""
+    property bool emphasised: false
+    property bool hasCursor: false
+    property bool hovered: false
+    signal activated()
+
+    readonly property bool lit: (hasCursor || hovered) && segment.enabled
+
+    // Anchored children handle the layout, so the height comes from the caller
+    // (the bar's inner Row); this keeps a sane standalone size for safety.
+    implicitHeight: Style.space(38)
+
+    color: lit
+      ? Style.hoverFillFor(root.foreground, root.accent)
+      : (emphasised && segment.enabled
+        ? Util.alpha(root.accent, 0.16)
+        : "transparent")
+    borderSpec: lit
+      ? Border.controlSpec("hover-cursor", root.foreground, root.accent)
+      : Border.none()
+    radius: Math.max(1, Style.cornerRadius - Style.space(2))
+    opacity: segment.enabled ? 1.0 : 0.45
+
+    Row {
+      anchors.centerIn: parent
+      spacing: Style.space(6)
+
+      Text {
+        text: segment.iconText
+        textFormat: Text.PlainText
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.icon
+        anchors.verticalCenter: parent.verticalCenter
+      }
+
+      Text {
+        text: segment.label
+        textFormat: Text.PlainText
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+        elide: Text.ElideRight
+        anchors.verticalCenter: parent.verticalCenter
+      }
+    }
+
+    MouseArea {
+      id: segmentMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      acceptedButtons: Qt.LeftButton
+      onClicked: if (segment.enabled) segment.activated()
+      onContainsMouseChanged: segment.hovered = containsMouse
+    }
+
+    PanelToolTip {
+      visible: segmentMouse.containsMouse && segment.tooltipText !== ""
+      text: segment.tooltipText
+      fontFamily: root.fontFamily
+    }
+  }
+
+  // One preference card: icon, label, and the current value in a pill on the
+  // right. The whole card is the hit target, so the setting is one click from
+  // anywhere on the row rather than one click on a small button.
+  component PrefRow: BorderSurface {
+    id: prefRow
+
+    property string iconText: ""
+    property string label: ""
+    property string stateText: ""
+    property bool isOn: false
+    property string tooltipText: ""
+    property bool hovered: false
+    signal activated()
+
+    color: prefRow.hovered
+      ? Style.hoverFillFor(root.foreground, root.accent)
+      : root.cardFill
+    borderSpec: Border.flat(
+      prefRow.hovered ? Util.alpha(root.accent, 0.40) : root.cardBorder,
+      root.cardBorderWidth)
+    radius: Style.cornerRadius
+
+    implicitHeight: Style.space(40)
+
+    Text {
+      id: prefIcon
+      anchors.left: parent.left
+      anchors.leftMargin: Style.spacing.xl
+      anchors.verticalCenter: parent.verticalCenter
+      text: prefRow.iconText
+      textFormat: Text.PlainText
+      color: prefRow.isOn ? root.accent : root.muted
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.icon
+    }
+
+    Text {
+      id: prefLabel
+      anchors.left: prefIcon.right
+      anchors.leftMargin: Style.spacing.sm
+      anchors.right: prefChip.left
+      anchors.rightMargin: Style.spacing.sm
+      anchors.verticalCenter: parent.verticalCenter
+      text: prefRow.label
+      textFormat: Text.PlainText
+      color: root.foreground
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.body
+      elide: Text.ElideRight
+    }
+
+    // The value chip. Tinted with the accent when the setting is on, a plain
+    // wash when it is off -- so the row's state is legible at a glance.
+    Rectangle {
+      id: prefChip
+      anchors.right: parent.right
+      anchors.rightMargin: Style.spacing.xl
+      anchors.verticalCenter: parent.verticalCenter
+      width: prefChipText.implicitWidth + Style.spacing.xl
+      height: Style.space(23)
+      radius: height / 2
+      antialiasing: true
+      color: prefRow.isOn
+        ? Util.alpha(root.accent, 0.26)
+        : Util.alpha(root.foreground, 0.12)
+      border.width: root.cardBorderWidth
+      border.color: prefRow.isOn
+        ? Util.alpha(root.accent, 0.55)
+        : Util.alpha(root.foreground, 0.22)
+
+      Text {
+        id: prefChipText
+        anchors.centerIn: parent
+        text: prefRow.stateText
+        textFormat: Text.PlainText
+        color: prefRow.isOn ? root.accent : root.muted
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+    }
+
+    MouseArea {
+      id: prefMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      acceptedButtons: Qt.LeftButton
+      onClicked: prefRow.activated()
+      onContainsMouseChanged: prefRow.hovered = containsMouse
+    }
+
+    PanelToolTip {
+      visible: prefMouse.containsMouse && prefRow.tooltipText !== ""
+      text: prefRow.tooltipText
+      fontFamily: root.fontFamily
     }
   }
 }
