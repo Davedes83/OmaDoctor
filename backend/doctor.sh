@@ -180,6 +180,10 @@ printf '%s\n' "$DOC"
 
 # Persist the snapshot atomically so a reader never sees a half-written file.
 # The state dir is created by bootstrap.sh under a restrictive umask.
+#
+# FILESYSTEM SAFETY: Atomic write via temp file + mv. The temp file uses
+# the shell PID ($$) to avoid collisions. On mv failure, the temp file is
+# cleaned up. The state directory has umask 077 (owner-only).
 SNAP="$OMADOCTOR_STATE_DIR/last-scan.json"
 TMP="$OMADOCTOR_STATE_DIR/.last-scan.$$"
 if printf '%s\n' "$DOC" > "$TMP" 2>/dev/null; then
@@ -187,6 +191,7 @@ if printf '%s\n' "$DOC" > "$TMP" 2>/dev/null; then
 fi
 
 # A timestamp file lets the QML layer detect staleness without re-parsing JSON.
+# Same atomic pattern: temp file + mv, with cleanup on failure.
 printf '%s\n' "$TS" > "$OMADOCTOR_STATE_DIR/last-scan.ts.tmp.$$" 2>/dev/null \
   && /usr/bin/mv -f "$OMADOCTOR_STATE_DIR/last-scan.ts.tmp.$$" \
                 "$OMADOCTOR_STATE_DIR/last-scan.ts" 2>/dev/null
@@ -205,6 +210,13 @@ printf '%s\n' "$TS" > "$OMADOCTOR_STATE_DIR/last-scan.ts.tmp.$$" 2>/dev/null \
 # The point of the history is to survive a shell restart: without it the first
 # scan after `omarchy restart shell` has no baseline and reports nothing, which
 # is precisely when a user most wants to know what moved.
+#
+# FILESYSTEM SAFETY:
+#   * History directory: $OMADOCTOR_STATE_DIR/history (created with umask 077)
+#   * Atomic writes: temp file (.epoch.PID) + mv to epoch.json
+#   * Bounded retention: keeps only newest 20 entries, pruned by filename sort
+#   * Filename is epoch seconds, so lexicographic sort = chronological order
+#   * Cleanup skips in-flight temp files (.*.*.*) and non-matching names
 if [ "$MODE" = "full" ]; then
   HIST_DIR="$OMADOCTOR_STATE_DIR/history"
   if mkdir -p "$HIST_DIR" 2>/dev/null; then

@@ -15,6 +15,13 @@
 # OmaDoctor is read-only with respect to system configuration: nothing here
 # grants write access to /etc or ~/.config/hypr. The state dir holds only
 # diagnostic cache and scan history.
+#
+# FILESYSTEM SAFETY:
+#   * State directory: $HOME/.local/state/omadoctor (XDG_STATE_HOME compliant)
+#   * Created with umask 077 (owner-only read/write/execute)
+#   * All writes use atomic temp-file + mv pattern to avoid partial reads
+#   * History bounded to 20 most recent full-scan snapshots (auto-pruned)
+#   * No writes outside the state directory; all probes are read-only
 umask 077
 
 export PATH=/usr/bin:/bin

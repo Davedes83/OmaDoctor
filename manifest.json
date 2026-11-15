@@ -11,6 +11,59 @@
   "entryPoints": {
     "barWidget": "Panel.qml"
   },
+  "dependencies": {
+    "binaries": [
+      "systemctl",
+      "hyprctl",
+      "wpctl",
+      "ip",
+      "ping",
+      "df",
+      "findmnt",
+      "du",
+      "free",
+      "uname",
+      "nproc",
+      "date",
+      "cat",
+      "timeout",
+      "head",
+      "awk",
+      "sed",
+      "tr",
+      "grep",
+      "wc",
+      "cut",
+      "sort",
+      "jq",
+      "checkupdates",
+      "nmcli",
+      "resolvectl",
+      "getent",
+      "tee",
+      "wl-copy",
+      "omarchy-notification-send",
+      "omarchy-launch-terminal",
+      "which"
+    ],
+    "services": [
+      "systemd (user and system)",
+      "pipewire",
+      "wireplumber",
+      "pipewire-pulse",
+      "xdg-desktop-portal",
+      "xdg-desktop-portal-hyprland",
+      "NetworkManager",
+      "bluetooth"
+    ],
+    "filesystems": [
+      "/proc",
+      "/sys",
+      "/etc/os-release",
+      "/etc/resolv.conf",
+      "/proc/sys/kernel/hostname"
+    ]
+  },
   "barWidget": {
     "displayName": "OmaDoctor",
     "description": "System health and diagnostics",

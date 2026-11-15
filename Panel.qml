@@ -912,6 +912,14 @@ Panel {
   //
   // Nothing is executed during discovery -- only `which <name>` -- and the
   // result is still only a suggestion the user confirms before anything runs.
+  //
+  // PROCESS-LIFETIME NOTE: This process intentionally inherits the shell's
+  // environment to resolve user-installed AI CLIs from their actual locations.
+  // It runs ONLY `which <binary>` (no arguments, no user input), exits
+  // immediately, and the result is a boolean map used for a one-time
+  // suggestion. No data from this process ever reaches the diagnostic report
+  // or leaves the machine. The sequential queue (one `which` at a time)
+  // bounds fork pressure.
   Process {
     id: aiProbeProc
     property string name: ""
@@ -1132,6 +1140,13 @@ Panel {
 
   // The AI itself. Deliberately NOT the hardened environment (see above) --
   // the user's assistant needs their real PATH, credentials and config.
+  //
+  // PROCESS-LIFETIME NOTE: This process spawns the user's terminal with their
+  // full environment. It is launched ONLY after explicit user confirmation in
+  // the Ask AI sheet (Enter/Send button). The terminal is setsid'd away by
+  // omarchy-launch-terminal, so this Process exits immediately after spawn.
+  // No diagnostic data flows through this process; it only carries the
+  // confirmed command line.
   Process {
     id: aiLaunchProc
     onExited: function() {
