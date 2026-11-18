@@ -755,4 +755,83 @@ check_eq "line counting is newline-safe" "2" \
 check_eq "line counting handles a single line" "1" \
   "$(printf '%s\n' "DP-1" | /usr/bin/grep -c . | /usr/bin/tr -d ' ')"
 
+# ------------------------------------------------ swap against stubbed inputs
+#
+# Any swap use raised "attention" (issue #3), though zram swaps idle pages on
+# every healthy machine. The rule is driven here with stubbed free(1),
+# /proc/swaps and PSI, so it is tested on machines without the condition, and
+# its boundaries are pinned: 80% of total swap, and PSI "some" avg60 of 10%.
+SW_TMP=$(mktemp -d)
+cp "$BACKEND_DIR/bootstrap.sh" "$BACKEND_DIR/common.sh" "$BACKEND_DIR/sysinfo.sh" "$SW_TMP/" 2>/dev/null
+cat > "$SW_TMP/free" <<'STUB'
+#!/bin/sh
+printf '              total        used        free\n'
+printf 'Mem:    32000000000 16000000000 16000000000\n'
+printf 'Swap:   %s %s 0\n' "$SW_TOTAL" "$SW_USED"
+STUB
+chmod +x "$SW_TMP/free"
+sed -e "s#/usr/bin/free#$SW_TMP/free#g" \
+    -e "s#/proc/pressure/memory#$SW_TMP/psi#g" \
+    -e "s#/proc/swaps#$SW_TMP/swaps#g" \
+    "$SW_TMP/sysinfo.sh" > "$SW_TMP/sysinfo.test.sh"
+
+# sw_run TOTAL USED AVG60|none zram|disk|both [ZRAM_USED_OF_100, default 10]
+# Runs under the interpreter under test (run_interp), with its own state dir so
+# it cannot race a concurrent suite over the shared history files.
+sw_run() {
+  rm -f "$SW_TMP/psi"
+  if [ "$3" != none ]; then
+    printf 'some avg10=0.00 avg60=%s avg300=0.00 total=1\n' "$3" > "$SW_TMP/psi"
+    printf 'full avg10=0.00 avg60=0.00 avg300=0.00 total=1\n' >> "$SW_TMP/psi"
+  fi
+  printf 'Filename Type Size Used Priority\n' > "$SW_TMP/swaps"
+  case "$4" in zram | both) printf '/dev/zram0 partition 100 %s 100\n' "${5:-10}" >> "$SW_TMP/swaps" ;; esac
+  case "$4" in disk | both) printf '/swap/swapfile file 100 0 0\n' >> "$SW_TMP/swaps" ;; esac
+  SW_TOTAL=$1 SW_USED=$2 OMADOCTOR_MODE=quick OMADOCTOR_STATE_DIR="$SW_TMP/state" \
+    run_interp "$SW_TMP/sysinfo.test.sh" 2>/dev/null </dev/null
+}
+sw_get() { printf '%s' "$1" | jq -r --arg f "$2" '.checks[]|select(.id=="system.swap")|.[$f]' 2>/dev/null; }
+
+r=$(sw_run 10000 2800 0.06 zram)
+check_eq "zram swap in use without pressure is ok" "ok" "$(sw_get "$r" status)"
+check_eq "the swap value is used over total" "28% used" "$(sw_get "$r" value)"
+check_eq "the detail names zram and the pressure reading" \
+  "zram swap in use; memory pressure 0.06% (avg60), below the 10% warning level" \
+  "$(sw_get "$r" detail)"
+
+# 80% of TOTAL swap is the capacity boundary; the value is integer-truncated.
+check_eq "79.99% of total swap is ok" "ok" "$(sw_get "$(sw_run 10000 7999 0.00 zram)" status)"
+check_eq "80% of total swap is attention" "attention" \
+  "$(sw_get "$(sw_run 10000 8000 0.00 zram)" status)"
+
+# PSI some avg60 of 10% is the pressure boundary.
+check_eq "PSI avg60 9.99 is ok" "ok" "$(sw_get "$(sw_run 10000 2000 9.99 zram)" status)"
+check_eq "PSI avg60 10.00 is attention" "attention" \
+  "$(sw_get "$(sw_run 10000 2000 10.00 zram)" status)"
+
+# Missing PSI must not be reported as "no pressure"; the capacity rule still applies.
+r=$(sw_run 10000 2000 none zram)
+check_eq "missing PSI falls back to the capacity rule" "ok" "$(sw_get "$r" status)"
+check_eq "missing PSI is stated, not presented as no pressure" \
+  "zram swap in use; memory pressure unavailable" "$(sw_get "$r" detail)"
+check_eq "missing PSI with nearly full swap is still attention" "attention" \
+  "$(sw_get "$(sw_run 10000 9000 none zram)" status)"
+
+# The label describes the configured devices; the percentage is of total swap.
+check_eq "mixed zram and disk swap is labelled as both" \
+  "zram and disk swap in use; memory pressure 0.00% (avg60), below the 10% warning level" \
+  "$(sw_get "$(sw_run 10000 500 0.00 both)" detail)"
+# Omarchy pairs zram with an equally sized swapfile, so a full zram is only
+# ~50% of total swap: the fullest zram device is checked on its own.
+check_eq "zram 79% full with low total is ok" "ok" \
+  "$(sw_get "$(sw_run 10000 3950 0.00 both 79)" status)"
+r=$(sw_run 10000 4000 0.00 both 80)
+check_eq "zram 80% full with low total is attention" "attention" "$(sw_get "$r" status)"
+check_eq "a full zram is named in the detail" \
+  "zram 80% full; further swapping goes to slower swap or fails; memory pressure 0.00% (avg60), below the 10% warning level" \
+  "$(sw_get "$r" detail)"
+check_eq "unused swap is still ok and unchanged" "configured, unused" \
+  "$(sw_get "$(sw_run 10000 0 50.00 zram)" value)"
+rm -rf "$SW_TMP"
+
 finish

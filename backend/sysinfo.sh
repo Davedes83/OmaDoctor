@@ -137,10 +137,54 @@ if have free; then
   sused=${2:-0}
   if [ "$stotal" -gt 0 ]; then
     spct=$(printf '%s %s' "$sused" "$stotal" | /usr/bin/awk '{printf "%d", ($2>0 ? $1*100/$2 : 0)}')
+    # Swap in use is not, by itself, a symptom. With zram (Omarchy's default)
+    # the kernel moves idle pages into compressed RAM long before memory is
+    # short, so "any swap used" warned on every healthy machine (issue #3).
+    # Warn on what actually hurts: total swap mostly used, or the kernel
+    # reporting that tasks stall on memory (PSI "some" avg60, a percentage of
+    # wall time). PSI is only consulted here, while swap is in use.
     if [ "$sused" -gt 0 ]; then
-      emit "system.swap" system attention 1 "Swap" "${spct}% used" \
-        "swap in use" \
-        "Swap activity usually means memory pressure. Fine occasionally; concerning under sustained load."
+      psi=$(/usr/bin/awk '/^some / { for (i = 2; i <= NF; i++)
+              if ($i ~ /^avg60=[0-9]+(\.[0-9]+)?$/) { sub(/^avg60=/, "", $i); print $i } }' \
+              /proc/pressure/memory 2>/dev/null)
+      psi_int=${psi%%.*}
+      case "$psi_int" in '' | *[!0-9]*) psi=""; psi_int="" ;; esac
+      # /proc/swaps also gives the fullest zram device. Omarchy pairs zram with
+      # an equally sized hibernation swapfile at a lower priority, so a
+      # completely full zram is only ~50% of total swap and the 80% rule alone
+      # would not see it.
+      swapinfo=$(/usr/bin/awk 'NR > 1 && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {
+                if ($1 ~ /^\/dev\/zram/) { z = 1; if ($3 > 0 && $4 * 100 / $3 > zmax) zmax = int($4 * 100 / $3) }
+                else d = 1 }
+              END { if (z && d) k = "zram and disk swap"; else if (z) k = "zram swap";
+                    else if (d) k = "disk swap"; else k = "swap"
+                    printf "%d %s", zmax + 0, k }' /proc/swaps 2>/dev/null)
+      zpct=${swapinfo%% *}
+      devs=${swapinfo#* }
+      case "$zpct" in '' | *[!0-9]*) zpct=0 ;; esac
+      [ -n "$devs" ] && [ "$devs" != "$swapinfo" ] || devs="swap"
+      if [ -n "$psi" ]; then
+        pressure="memory pressure ${psi}% (avg60)"
+        [ "$psi_int" -lt 10 ] && pressure="$pressure, below the 10% warning level"
+      else
+        pressure="memory pressure unavailable"
+      fi
+      if [ "$spct" -ge 80 ]; then
+        emit "system.swap" system attention 1 "Swap" "${spct}% used" \
+          "$devs, ${spct}% of total used; $pressure" \
+          "Little swap capacity remains. If memory keeps growing, the kernel will start killing processes."
+      elif [ "$zpct" -ge 80 ]; then
+        emit "system.swap" system attention 1 "Swap" "${spct}% used" \
+          "zram ${zpct}% full; further swapping goes to slower swap or fails; $pressure" \
+          "Compressed RAM swap is nearly full. If memory keeps growing, close memory-heavy apps."
+      elif [ -n "$psi_int" ] && [ "$psi_int" -ge 10 ]; then
+        emit "system.swap" system attention 1 "Swap" "${spct}% used" \
+          "$devs in use; $pressure" \
+          "Tasks are stalling on memory. If this persists, close memory-heavy apps or add RAM."
+      else
+        emit "system.swap" system ok 0 "Swap" "${spct}% used" \
+          "$devs in use; $pressure" ""
+      fi
     else
       emit "system.swap" system ok 0 "Swap" "configured, unused" \
         "$(printf '%s' "$stotal" | /usr/bin/awk '{printf "%.1f GiB", $1/1073741824}')" ""
